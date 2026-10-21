@@ -3,12 +3,32 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:OneClickSpeedup"
     Title="一键电脑加速">
-  <Grid x:Name="Root" Padding="12" RowSpacing="8">
+  <Grid x:Name="Outer">
+  <Grid.RowDefinitions><RowDefinition Height="32"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <Grid x:Name="AppTitleBar" Background="Transparent" Padding="12,0,140,0">
+    <TextBlock Text="一键电脑加速" FontSize="12" VerticalAlignment="Center" Opacity="0.8"/>
+  </Grid>
+  <Grid x:Name="Root" Grid.Row="1" Padding="12,4,12,12" RowSpacing="8">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
-    <TextBlock Text="一键电脑加速" Style="{StaticResource SubtitleTextBlockStyle}"/>
+    <Grid>
+      <TextBlock Text="一键电脑加速" Style="{StaticResource SubtitleTextBlockStyle}"/>
+      <Button x:Name="SettingsBtn" HorizontalAlignment="Right" Padding="6" ToolTipService.ToolTip="设置">
+        <FontIcon Glyph="&#xE713;" FontSize="16"/>
+        <Button.Flyout>
+          <Flyout x:Name="SettingsFlyout" Placement="BottomEdgeAlignedRight">
+            <StackPanel Spacing="4" Width="220">
+              <TextBlock Text="设置" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+              <ToggleSwitch x:Name="AutoStartSw" Header="开机自动启动" Toggled="Settings_Toggled"/>
+              <ToggleSwitch x:Name="AutoBoostSw" Header="启动后自动加速" Toggled="Settings_Toggled"/>
+              <ToggleSwitch x:Name="TrimDefaultSw" Header="默认清理系统内存" Toggled="Settings_Toggled"/>
+            </StackPanel>
+          </Flyout>
+        </Button.Flyout>
+      </Button>
+    </Grid>
     <StackPanel Grid.Row="1">
       <TextBlock Text="加速系统性能" Opacity="0.7" FontSize="12"/>
       <CheckBox x:Name="TrimMemory" Content="清理系统内存" Checked="TrimMemory_Changed" Unchecked="TrimMemory_Changed"/>
@@ -38,5 +58,6 @@
     </StackPanel>
     <Button Grid.Row="6" x:Name="BoostBtn" Content="一键加速" Style="{StaticResource AccentButtonStyle}"
             HorizontalAlignment="Stretch" Height="40" Click="Boost_Click"/>
+  </Grid>
   </Grid>
 </Window>

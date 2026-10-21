@@ -8,6 +8,7 @@ public class Config
     public HashSet<string> Checked { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> Whitelist { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public bool TrimMemory { get; set; }
+    public bool AutoBoostOnLaunch { get; set; }
     static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OneClickBoost");
     static string FilePath => Path.Combine(Dir, "config.json");
     public static Config Load()

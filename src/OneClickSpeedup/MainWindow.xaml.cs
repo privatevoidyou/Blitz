@@ -51,18 +51,43 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Title = "一键电脑加速";
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Standard;
+        AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
+        AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
+        AppWindow.TitleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(40, 255, 255, 255);
+        AppWindow.TitleBar.ButtonInactiveForegroundColor = Colors.Gray;
         if (MicaController.IsSupported()) SystemBackdrop = new MicaBackdrop();
-        else Root.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 32, 32, 32));
+        else Outer.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 32, 32, 32));
         var scale = GetDpiForWindowSafe();
         AppWindow.Resize(new Windows.Graphics.SizeInt32((int)(320 * scale), (int)(460 * scale)));
         if (AppWindow.Presenter is OverlappedPresenter op) op.IsMaximizable = false;
         AppWindow.TitleBar.ButtonForegroundColor = Colors.White;
         List.ItemsSource = _view;
-        _loading = true; TrimMemory.IsChecked = _cfg.TrimMemory; _loading = false;
+        _loading = true;
+        TrimMemory.IsChecked = _cfg.TrimMemory;
+        AutoStartSw.IsOn = AutoStart.IsEnabled();
+        AutoBoostSw.IsOn = _cfg.AutoBoostOnLaunch;
+        TrimDefaultSw.IsOn = _cfg.TrimMemory;
+        _loading = false;
         Reload();
         UpdateMem();
         _timer.Tick += (_, _) => UpdateMem();
         _timer.Start();
+        var args = Environment.GetCommandLineArgs();
+        if (args.Contains("--open-settings"))
+            Root.Loaded += (_, _) => SettingsFlyout.ShowAt(SettingsBtn);
+        else if (_cfg.AutoBoostOnLaunch && _all.Any(i => i.Checked))
+            Root.Loaded += (_, _) => Boost_Click(this, new RoutedEventArgs());
+    }
+
+    void Settings_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        if (sender == AutoStartSw) { if (!AutoStart.Set(AutoStartSw.IsOn)) { _loading = true; AutoStartSw.IsOn = AutoStart.IsEnabled(); _loading = false; } }
+        else if (sender == AutoBoostSw) { _cfg.AutoBoostOnLaunch = AutoBoostSw.IsOn; _cfg.Save(); }
+        else if (sender == TrimDefaultSw) { _cfg.TrimMemory = TrimDefaultSw.IsOn; _cfg.Save(); _loading = true; TrimMemory.IsChecked = TrimDefaultSw.IsOn; _loading = false; }
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
@@ -151,6 +176,7 @@ public sealed partial class MainWindow : Window
     {
         if (_loading) return;
         _cfg.TrimMemory = TrimMemory.IsChecked == true; _cfg.Save();
+        _loading = true; TrimDefaultSw.IsOn = _cfg.TrimMemory; _loading = false;
     }
 
     void Item_RightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
