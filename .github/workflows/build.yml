@@ -1,0 +1,41 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - name: Publish
+        working-directory: src/OneClickSpeedup
+        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:WindowsAppSDKSelfContained=true -p:Platform=x64 -o ../../out
+      - uses: actions/upload-artifact@v4
+        with: { name: OneClickSpeedup-exe, path: out/OneClickSpeedup.exe }
+      - name: Launch and screenshot
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $p = Start-Process out/OneClickSpeedup.exe -PassThru
+          Start-Sleep -Seconds 12
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$PWD/screenshot.png")
+          Write-Host "HasExited: $($p.HasExited)"
+          if (-not $p.HasExited) { $p.Kill() }
+      - uses: actions/upload-artifact@v4
+        with: { name: screenshot, path: screenshot.png, if-no-files-found: warn }
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: OneClickSpeedup build ${{ github.run_number }}
+          files: out/OneClickSpeedup.exe
