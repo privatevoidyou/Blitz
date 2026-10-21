@@ -56,7 +56,7 @@ $allowed = @($a.Id)
 $bad = @($rep.touched_pids | Where-Object { $allowed -notcontains $_ })
 Check "only the checked process was touched" ($bad.Count -eq 0) ("touched=" + ($rep.touched_pids -join ","))
 $dead = @($prot | Where-Object { -not (Alive $_.Id) })
-Check "no protected process died" ($dead.Count -eq 0) ($dead | ForEach-Object { $_.Name }) -join ","
+Check "no protected process died" ($dead.Count -eq 0) (($dead | ForEach-Object { $_.Name }) -join ",")
 Stop-Process -Id $b.Id, $x.Id -Force -ErrorAction SilentlyContinue
 
 # ---- 2. first run: no config -> nothing killed ----
