@@ -26,6 +26,9 @@ fn main() {
         let ok = win::autostart_set(v == "on");
         std::process::exit(if ok && win::autostart_get() == (v == "on") { 0 } else { 1 });
     }
+    if !win::single_instance() {
+        return;
+    }
     ui::run(args, dir, legacy);
 }
 

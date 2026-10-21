@@ -13,7 +13,7 @@ component IconBtn inherits Rectangle {
     HorizontalLayout {
         padding-left: 6px; padding-right: 6px; spacing: 4px;
         alignment: center;
-        Text { text: root.glyph; font-family: "Segoe Fluent Icons, Segoe MDL2 Assets"; font-size: root.glyph-size; color: white; vertical-alignment: center; }
+        Text { text: root.glyph; font-family: "Segoe MDL2 Assets"; font-size: root.glyph-size; color: white; vertical-alignment: center; }
         if root.label != "": Text { text: root.label; color: #ffffffe0; font-size: 12px; vertical-alignment: center; }
     }
     ta := TouchArea { clicked => { root.clicked(); } }
@@ -202,7 +202,7 @@ export component Panel inherits Window {
                     alignment: center; spacing: 4px; padding-left: 4px; padding-right: 4px;
                     HorizontalLayout {
                         Text { text: "资源占用:" + round(root.mem-pct * 100) + "%"; color: white; font-size: 12px; horizontal-stretch: 1; }
-                        Text { text: root.view == 1 ? "\u{E70E}" : "\u{E70D}"; font-family: "Segoe Fluent Icons, Segoe MDL2 Assets"; font-size: 10px; color: #ffffffb0; vertical-alignment: center; }
+                        Text { text: root.view == 1 ? "\u{E70E}" : "\u{E70D}"; font-family: "Segoe MDL2 Assets"; font-size: 10px; color: #ffffffb0; vertical-alignment: center; }
                     }
                     Rectangle {
                         height: 5px; border-radius: 2.5px; background: #ffffff20;

@@ -72,6 +72,13 @@ fn render_apps(ui: &Panel, s: &mut State) {
         .filter(|&i| ql.is_empty() || s.launchers[i].name.to_lowercase().contains(&ql))
         .collect();
     s.page_items = filtered.into_iter().skip(s.page * PER_PAGE).take(PER_PAGE).collect();
+    // icons are extracted lazily, only for the visible page, and cached
+    for k in s.page_items.clone() {
+        if s.launcher_icons[k].is_none() {
+            let img = win::file_icon(&s.launchers[k].path, true).map(|(w, h, px)| to_image(w, h, &px)).unwrap_or_default();
+            s.launcher_icons[k] = Some(img);
+        }
+    }
     let v: Vec<App> = s
         .page_items
         .iter()
@@ -160,36 +167,12 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     ui.set_auto_boost(cfg.auto_boost);
     ui.set_auto_start(win::autostart_get());
 
-    // ---- launchers (icons loaded off-thread) ----
+    // ---- launchers ----
     st.borrow_mut().launchers = win::scan_launchers();
     {
         let mut s = st.borrow_mut();
         s.launcher_icons = vec![None; s.launchers.len()];
         render_apps(&ui, &mut s);
-        let paths: Vec<String> = s.launchers.iter().map(|l| l.path.clone()).collect();
-        let weak = ui.as_weak();
-        let st2 = Rc::downgrade(&st);
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<Option<(u32, u32, Vec<u8>)>>>();
-        std::thread::spawn(move || {
-            unsafe {
-                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-            }
-            let icons = paths.iter().map(|p| win::file_icon(p, true)).collect();
-            let _ = tx.send(icons);
-            let _ = slint::invoke_from_event_loop(|| {});
-        });
-        let t = slint::Timer::default();
-        let rx = RefCell::new(Some(rx));
-        t.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
-            let Some(r) = rx.borrow().as_ref().and_then(|r| r.try_recv().ok()) else { return };
-            *rx.borrow_mut() = None;
-            if let (Some(ui), Some(st)) = (weak.upgrade(), st2.upgrade()) {
-                let mut s = st.borrow_mut();
-                s.launcher_icons = r.into_iter().map(|o| o.map(|(w, h, px)| to_image(w, h, &px))).collect();
-                render_apps(&ui, &mut s);
-            }
-        });
-        std::mem::forget(t); // lives for the app lifetime
     }
 
     // ---- callbacks ----

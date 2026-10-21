@@ -254,7 +254,17 @@ pub fn boost(cfg: &Config, trim: bool) -> BoostReport {
             tree.push(p);
             if let Some(cs) = children.get(&p) {
                 for c in cs {
-                    if c.pid != p && !facts_protected(c, image_path(c.pid).as_deref(), self_pid, my_session) {
+                    if c.pid == p {
+                        continue;
+                    }
+                    let cp = image_path(c.pid);
+                    if facts_protected(c, cp.as_deref(), self_pid, my_session) {
+                        continue;
+                    }
+                    // only descendants that are the same program or are themselves checked:
+                    // unchecked programs are never touched, even when launched by a checked one
+                    let ck = cp.unwrap_or_default().to_lowercase();
+                    if ck == *key || cfg.is_checked(&ck) {
                         stack.push(c.pid);
                     }
                 }
@@ -583,5 +593,19 @@ pub mod tray {
         if h.is_invalid() { return None; }
         let id = NOTIFYICONIDENTIFIER { cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: h, uID: 1, ..Default::default() };
         unsafe { Shell_NotifyIconGetRect(&id).ok() }
+    }
+}
+
+/// False when another Blitz UI instance is already running in this session.
+pub fn single_instance() -> bool {
+    unsafe {
+        match windows::Win32::System::Threading::CreateMutexW(None, true, w!("Local\\BlitzSingleInstance")) {
+            Ok(h) => {
+                let first = GetLastError() != ERROR_ALREADY_EXISTS;
+                let _ = h; // keep the mutex handle open for the process lifetime
+                first
+            }
+            Err(_) => true,
+        }
     }
 }

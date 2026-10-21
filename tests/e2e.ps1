@@ -59,6 +59,18 @@ $dead = @($prot | Where-Object { -not (Alive $_.Id) })
 Check "no protected process died" ($dead.Count -eq 0) (($dead | ForEach-Object { $_.Name }) -join ",")
 Stop-Process -Id $b.Id, $x.Id -Force -ErrorAction SilentlyContinue
 
+# ---- 1b. unchecked child of a checked parent survives ----
+$parentExe = Join-Path $work "dummyP.exe"; Copy-Item "$env:WINDIR\System32\cmd.exe" $parentExe -Force
+$childExe = Join-Path $work "dummyQ.exe"; Copy-Item $ping $childExe -Force
+$pp = Start-Process $parentExe -ArgumentList "/c", "`"$childExe`" -t 127.0.0.1" -WindowStyle Hidden -PassThru
+Start-Sleep 2
+$q = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($pp.Id)" | Where-Object { $_.Name -eq "dummyQ.exe" } | Select-Object -First 1
+WriteCfg @($parentExe)
+Start-Process $Exe -ArgumentList "--selftest-boost", $report -Wait
+Check "checked parent killed" (-not (Alive $pp.Id))
+Check "unchecked child of checked parent survived" (($null -ne $q) -and (Alive $q.ProcessId)) "child=$($q.ProcessId)"
+if ($q) { Stop-Process -Id $q.ProcessId -Force -ErrorAction SilentlyContinue }
+
 # ---- 2. first run: no config -> nothing killed ----
 Remove-Item (Join-Path $cfgDir "config.json")
 $c = Dummy "dummyC.exe"
