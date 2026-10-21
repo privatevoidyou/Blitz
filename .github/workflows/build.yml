@@ -5,53 +5,51 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+env:
+  RELEASE_TAG: build-3
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with: { dotnet-version: '8.0.x' }
-      - name: Publish
-        working-directory: src/OneClickSpeedup
-        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:WindowsAppSDKSelfContained=true -p:Platform=x64 -o ../../out
-      - uses: actions/upload-artifact@v4
-        with: { name: OneClickSpeedup-exe, path: out/OneClickSpeedup.exe }
-      - name: Launch and screenshot
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal -c clippy && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: cargo test --target x86_64-pc-windows-msvc
+      - name: Clippy
+        run: cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Size
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory target\release -Force | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\Blitz.exe target\release\Blitz.exe -Force
+          $s = (Get-Item target\release\Blitz.exe).Length
+          "Blitz.exe size: $s bytes ($([math]::Round($s/1MB,2)) MB)" | Tee-Object -FilePath size.txt
+      - name: E2E tests
+        shell: pwsh
+        run: ./tests/e2e.ps1
+      - name: Screenshots
         shell: pwsh
         continue-on-error: true
-        run: |
-          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-          Add-Type @"
-          using System; using System.Runtime.InteropServices;
-          public static class W { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int c);
-            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-            [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }
-          "@
-          [W]::ShowWindow([W]::GetConsoleWindow(), 6) | Out-Null
-          Get-Process WindowsTerminal,OpenConsole -ErrorAction SilentlyContinue | ForEach-Object { [W]::ShowWindow($_.MainWindowHandle, 6) | Out-Null }
-          function Shot($name, $argv) {
-            $p = Start-Process out/OneClickSpeedup.exe -ArgumentList $argv -PassThru
-            Start-Sleep -Seconds 12
-            $p.Refresh(); [W]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-            Start-Sleep -Seconds 1
-            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-            $bmp.Save("$PWD/$name")
-            $kids = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | Select-Object -Expand Name
-            Write-Host "$name HasExited: $($p.HasExited) children: $kids"
-            if (-not $p.HasExited) { $p.Kill() }
-            Start-Sleep -Seconds 2
-          }
-          Shot "screenshot.png" "--ci"
-          Shot "screenshot-settings.png" "--open-settings"
+        run: ./tests/screenshots.ps1
       - uses: actions/upload-artifact@v4
-        with: { name: screenshot, path: "screenshot*.png", if-no-files-found: warn }
+        if: always()
+        with:
+          name: results
+          path: |
+            screenshot-*.png
+            e2e-results.txt
+            size.txt
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        with: { name: Blitz-exe, path: target/release/Blitz.exe }
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: OneClickSpeedup build ${{ github.run_number }}
-          files: out/OneClickSpeedup.exe
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Blitz 疾风加速 ${{ env.RELEASE_TAG }}
+          make_latest: true
+          files: target/release/Blitz.exe
