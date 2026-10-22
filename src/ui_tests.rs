@@ -14,9 +14,11 @@ slint::slint! {
         callback launched();
         in-out property <App> app;
         in-out property <Proc> item;
+        in-out property <bool> editable: true;
         callback toggled(bool);
         if !root.tile: ProcessEntry {
             item: root.item;
+            editable: root.editable;
             toggled(on) => { root.toggled(on); }
         }
         if root.tile: AppTile {
@@ -77,6 +79,13 @@ fn process_rows_and_shortcut_tiles_receive_mouse_input() {
     click_at(&ui, PointerEventButton::Left, 330.0, 15.0);
     assert!(!ui.get_item().checked);
     assert_eq!(*events.borrow(), vec![true, false, true, false]);
+
+    ui.set_editable(false);
+    click_at(&ui, PointerEventButton::Left, 16.0, 15.0);
+    click_at(&ui, PointerEventButton::Left, 120.0, 15.0);
+    assert!(!ui.get_item().checked);
+    assert_eq!(events.borrow().len(), 4, "selection must stay locked during boost");
+    ui.set_editable(true);
 
     click_at(&ui, PointerEventButton::Right, 120.0, 15.0);
     assert!(!ui.get_item().checked, "opening the whitelist menu must not select a process");

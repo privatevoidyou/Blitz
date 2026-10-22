@@ -7,11 +7,13 @@ export struct App { name: string, icon: image, added: bool }
 // image/text siblings have no input handlers; ContextMenuArea handles right click.
 export component ProcessEntry inherits ContextMenuArea {
     in property <Proc> item;
+    in property <bool> editable: true;
     callback toggled(bool);
     callback whitelist();
     height: root.item.hint == "" ? 30px : 44px;
-    enabled: !root.item.header;
+    enabled: !root.item.header && root.editable;
     if !root.item.header: CheckBox {
+        enabled: root.editable;
         x: 2px; width: parent.width - 2px; height: parent.height;
         text: ""; accessible-label: root.item.label + " " + root.item.hint;
         checked: root.item.checked;
@@ -39,7 +41,7 @@ export component ProcessEntry inherits ContextMenuArea {
     Menu {
         MenuItem {
             title: "加入白名单（永不显示）";
-            enabled: !root.item.header;
+            enabled: !root.item.header && root.editable;
             activated => { root.whitelist(); }
         }
     }
@@ -220,12 +222,13 @@ export component Panel inherits Window {
             // process selection
             if root.view == 1: VerticalLayout {
                 spacing: 6px;
-                CheckBox { text: "整理内存（仅本工具及所选程序）"; checked <=> root.trim; toggled => { root.trim-changed(self.checked); } }
+                CheckBox { text: "整理内存（仅本工具及所选程序）"; enabled: !root.busy; checked <=> root.trim; toggled => { root.trim-changed(self.checked); } }
                 Text { text: "点击整行勾选 · 右键白名单 · 后台依赖无法完整识别"; color: #ffffff90; font-size: 11px; }
                 ListView {
                     vertical-stretch: 1;
                     for p[i] in root.items: ProcessEntry {
                         item: p;
+                        editable: !root.busy;
                         toggled(on) => { root.toggled(i, on); }
                         whitelist => { root.whitelist(i); }
                     }
