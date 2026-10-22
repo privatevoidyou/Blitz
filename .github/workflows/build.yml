@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
 env:
-  RELEASE_TAG: build-4
+  RELEASE_TAG: build-5
 jobs:
   build:
     runs-on: windows-latest
@@ -45,6 +45,7 @@ jobs:
             screenshot-*.png
             e2e-results.txt
             size.txt
+            target/e2e/BlitzFixture.exe
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with: { name: Blitz-exe, path: target/release/Blitz.exe }
@@ -56,7 +57,8 @@ jobs:
           name: Blitz 疾风加速 ${{ env.RELEASE_TAG }}
           make_latest: true
           body: |
-            修复进程列表复选框被右键点击层遮挡的问题。支持勾选、取消勾选、搜索及重开后保留选择，右键白名单使用独立上下文菜单。
+            整行统一勾选；首页仅保留手动添加的快捷方式，支持从已安装程序选择或添加 .lnk / .exe。
+            修复启动点击被遮挡，增加系统/关键进程保护、保存窗口保留、白名单与未选中进程保护；内存整理仅作用于本工具和所选程序。
             Windows CI 检查：cargo test、clippy -D warnings、真实进程 e2e；保持 Rust 单文件托盘程序。
           files: |
             target/release/Blitz.exe

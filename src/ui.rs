@@ -26,13 +26,21 @@ struct State {
     launcher_icons: Vec<Option<Image>>,
     page: usize,
     page_items: Vec<usize>,
+    installed: Vec<Launcher>,
+    installed_items: Vec<usize>,
+    modal_open: bool,
     shown_at: Option<Instant>,
     keep_open: bool,
 }
 
 impl State {
-    fn save(&self) {
-        let _ = self.cfg.save(&self.dir);
+    fn save(&self, ui: &Panel) -> bool {
+        if let Err(error) = self.cfg.save(&self.dir) {
+            ui.set_status(format!("保存失败，本次更改未生效：{error}").into());
+            return false;
+        }
+        if ui.get_status().starts_with("保存失败") { ui.set_status("已保存".into()); }
+        true
     }
 }
 
@@ -62,6 +70,7 @@ fn render_rows(ui: &Panel, s: &mut State) {
             icon: r.group.and_then(|i| s.proc_icons.get(&s.groups[i].path).cloned()).unwrap_or_default(),
             checked: r.checked,
             header: r.group.is_none(),
+            hint: r.hint.clone().into(),
         })
         .collect();
     ui.set_items(ModelRc::new(VecModel::from(v)));
@@ -86,11 +95,45 @@ fn render_apps(ui: &Panel, s: &mut State) {
     let v: Vec<App> = s
         .page_items
         .iter()
-        .map(|&i| App { name: s.launchers[i].name.clone().into(), icon: s.launcher_icons.get(i).cloned().flatten().unwrap_or_default() })
+        .map(|&i| App { name: s.launchers[i].name.clone().into(), icon: s.launcher_icons.get(i).cloned().flatten().unwrap_or_default(), added: false })
         .collect();
     ui.set_apps(ModelRc::new(VecModel::from(v)));
     ui.set_page(s.page as i32);
     ui.set_pages(pages as i32);
+}
+
+fn sync_shortcuts(ui: &Panel, s: &mut State) {
+    s.launchers = s.cfg.shortcuts.clone();
+    s.launcher_icons = vec![None; s.launchers.len()];
+    render_apps(ui, s);
+}
+
+fn render_installed(ui: &Panel, s: &mut State) {
+    let query = ui.get_installed_query().trim().to_lowercase();
+    s.installed_items = s.installed.iter().enumerate()
+        .filter(|(_, app)| query.is_empty() || app.name.to_lowercase().contains(&query))
+        .map(|(i, _)| i).collect();
+    let apps: Vec<App> = s.installed_items.iter().map(|&i| {
+        let app = &s.installed[i];
+        App { name: app.name.clone().into(), icon: Image::default(),
+            added: s.cfg.shortcuts.iter().any(|saved| saved.path.eq_ignore_ascii_case(&app.path)) }
+    }).collect();
+    ui.set_installed(ModelRc::new(VecModel::from(apps)));
+}
+
+fn add_shortcut(ui: &Panel, s: &mut State, item: Launcher) {
+    let previous = s.cfg.shortcuts.clone();
+    let name = item.name.clone();
+    match s.cfg.add_shortcut(item) {
+        Ok(true) => {
+            if !s.save(ui) { s.cfg.shortcuts = previous; return; }
+            sync_shortcuts(ui, s);
+            render_installed(ui, s);
+            ui.set_status(format!("已添加：{name}").into());
+        }
+        Ok(false) => ui.set_status("这个快捷方式已经添加".into()),
+        Err(message) => ui.set_status(message.into()),
+    }
 }
 
 fn update_mem(ui: &Panel) {
@@ -116,6 +159,7 @@ fn show_panel(ui: &Panel, st: &S) {
 }
 
 fn hide_panel(ui: &Panel, st: &S) {
+    ui.set_shutdown_armed(false);
     let _ = ui.hide();
     st.borrow_mut().shown_at = None;
 }
@@ -137,6 +181,9 @@ fn start_boost(ui: &Panel, st: &S) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 let mut msg = format!("已结束 {} 个程序，释放内存约 {} MB", rep.killed.len(), rep.freed_mb);
+                if !rep.retained.is_empty() {
+                    msg += &format!("；{} 个程序仍在退出或有待处理窗口，请先保存", rep.retained.len());
+                }
                 if !rep.denied.is_empty() {
                     msg += &format!("；{} 个需管理员权限", rep.denied.len());
                     ui.set_show_admin(!win::is_admin());
@@ -164,24 +211,22 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
         launcher_icons: vec![],
         page: 0,
         page_items: vec![],
+        installed: vec![],
+        installed_items: vec![],
+        modal_open: false,
         shown_at: None,
         keep_open: has("--keep-open"),
     }));
     // persist migrated config under the new path
-    st.borrow().save();
+    st.borrow().save(&ui);
 
     ui.set_trim(cfg.trim_memory);
     ui.set_trim_default(cfg.trim_memory);
     ui.set_auto_boost(cfg.auto_boost);
     ui.set_auto_start(win::autostart_get());
 
-    // ---- launchers ----
-    st.borrow_mut().launchers = win::scan_launchers();
-    {
-        let mut s = st.borrow_mut();
-        s.launcher_icons = vec![None; s.launchers.len()];
-        render_apps(&ui, &mut s);
-    }
+    // Home contains only shortcuts explicitly saved by the user.
+    sync_shortcuts(&ui, &mut st.borrow_mut());
 
     // ---- callbacks ----
     let w = ui.as_weak();
@@ -205,12 +250,65 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     let w = ui.as_weak();
     let s2 = st.clone();
     ui.on_launch(move |i| {
-        let path = s2.borrow().page_items.get(i as usize).map(|&k| s2.borrow().launchers[k].path.clone());
-        if let (Some(p), Some(ui)) = (path, w.upgrade()) {
-            win::shell_open(&p, None, None);
-            if !s2.borrow().keep_open {
+        let item = { let s = s2.borrow(); s.page_items.get(i as usize).and_then(|&k| s.launchers.get(k)).cloned() };
+        if let (Some(item), Some(ui)) = (item, w.upgrade()) {
+            if !win::launch_shortcut(&item) {
+                ui.set_status("无法启动：文件已移动、快捷方式失效或权限不足".into());
+            } else if !s2.borrow().keep_open {
                 hide_panel(&ui, &s2);
             }
+        }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_remove_shortcut(move |i| {
+        if let Some(ui) = w.upgrade() {
+            let mut s = s2.borrow_mut();
+            let Some(&index) = s.page_items.get(i as usize) else { return };
+            let previous = s.cfg.shortcuts.clone();
+            s.cfg.shortcuts.remove(index);
+            if !s.save(&ui) { s.cfg.shortcuts = previous; return; }
+            sync_shortcuts(&ui, &mut s);
+        }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_show_add(move || {
+        if let Some(ui) = w.upgrade() {
+            let mut s = s2.borrow_mut();
+            s.installed = win::scan_launchers();
+            ui.set_view(3);
+            ui.set_status("".into());
+            render_installed(&ui, &mut s);
+        }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_installed_search(move |_| {
+        if let Some(ui) = w.upgrade() { render_installed(&ui, &mut s2.borrow_mut()); }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_add_installed(move |i| {
+        if let Some(ui) = w.upgrade() {
+            let mut s = s2.borrow_mut();
+            let item = s.installed_items.get(i as usize).and_then(|&index| s.installed.get(index)).cloned();
+            if let Some(item) = item { add_shortcut(&ui, &mut s, item); }
+        }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_browse_shortcut(move || {
+        if let Some(ui) = w.upgrade() {
+            s2.borrow_mut().modal_open = true;
+            let item = win::choose_shortcut(win::find_own_window("疾风加速"));
+            {
+                let mut s = s2.borrow_mut();
+                s.modal_open = false;
+                s.shown_at = Some(Instant::now());
+                if let Some(item) = item { add_shortcut(&ui, &mut s, item); }
+            }
+            if let Some(h) = win::find_own_window("疾风加速") { win::bring_to_front(h); }
         }
     });
     let w = ui.as_weak();
@@ -234,9 +332,16 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
         let mut s = s2.borrow_mut();
         let Some(gi) = s.rows.get(i as usize).and_then(|r| r.group) else { return };
         let key = s.groups[gi].key.clone();
+        let previous = s.cfg.clone();
         s.cfg.set_checked(&key, on);
         s.rows[i as usize].checked = on;
-        s.save();
+        if let Some(ui) = w.upgrade() {
+            if !s.save(&ui) {
+                s.cfg = previous;
+                render_rows(&ui, &mut s);
+                return;
+            }
+        }
         if let Some(ui) = w.upgrade() {
             let m = ui.get_items();
             if let Some(mut row) = m.row_data(i as usize) {
@@ -252,9 +357,12 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
             let mut s = s2.borrow_mut();
             let Some(gi) = s.rows.get(i as usize).and_then(|r| r.group) else { return };
             let key = s.groups[gi].key.clone();
+            let previous = s.cfg.clone();
             s.cfg.whitelist.insert(key.clone());
             s.cfg.set_checked(&key, false);
-            s.save();
+            if let Some(ui) = w.upgrade() {
+                if !s.save(&ui) { s.cfg = previous; }
+            }
         }
         if let Some(ui) = w.upgrade() {
             refresh_procs(&ui, &s2);
@@ -271,27 +379,36 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     let s2 = st.clone();
     ui.on_trim_changed(move |on| {
         let mut s = s2.borrow_mut();
+        let previous = s.cfg.trim_memory;
         s.cfg.trim_memory = on;
-        s.save();
         if let Some(ui) = w.upgrade() {
-            ui.set_trim_default(on);
+            if !s.save(&ui) { s.cfg.trim_memory = previous; }
+            ui.set_trim(s.cfg.trim_memory);
+            ui.set_trim_default(s.cfg.trim_memory);
         }
     });
     let w = ui.as_weak();
     let s2 = st.clone();
     ui.on_trim_default_changed(move |on| {
         let mut s = s2.borrow_mut();
+        let previous = s.cfg.trim_memory;
         s.cfg.trim_memory = on;
-        s.save();
         if let Some(ui) = w.upgrade() {
-            ui.set_trim(on);
+            if !s.save(&ui) { s.cfg.trim_memory = previous; }
+            ui.set_trim(s.cfg.trim_memory);
+            ui.set_trim_default(s.cfg.trim_memory);
         }
     });
     let s2 = st.clone();
+    let w = ui.as_weak();
     ui.on_auto_boost_changed(move |on| {
         let mut s = s2.borrow_mut();
+        let previous = s.cfg.auto_boost;
         s.cfg.auto_boost = on;
-        s.save();
+        if let Some(ui) = w.upgrade() {
+            if !s.save(&ui) { s.cfg.auto_boost = previous; }
+            ui.set_auto_boost(s.cfg.auto_boost);
+        }
     });
     let w = ui.as_weak();
     ui.on_auto_start_changed(move |on| {
@@ -305,7 +422,7 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     });
     ui.on_restart_admin(|| {
         if let Ok(exe) = std::env::current_exe() {
-            if win::shell_open(&exe.to_string_lossy(), Some("--open-panel"), Some("runas")) {
+            if win::shell_open(&exe.to_string_lossy(), Some("--open-panel --wait-for-instance"), Some("runas")) {
                 win::tray::remove();
                 std::process::exit(0);
             }
@@ -317,7 +434,7 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
         let Some(ui) = w.upgrade() else { return };
         if ui.get_shutdown_armed() {
             ui.set_shutdown_armed(false);
-            win::shell_open("shutdown.exe", Some("/s /t 0"), None);
+            win::shell_open(&win::system_exe("shutdown.exe"), Some("/s /t 0"), None);
         } else {
             ui.set_shutdown_armed(true);
             let w2 = ui.as_weak();
@@ -331,7 +448,7 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     let w = ui.as_weak();
     let s2 = st.clone();
     ui.on_my_computer(move || {
-        win::shell_open("explorer.exe", Some("shell:MyComputerFolder"), None);
+        win::shell_open(&win::system_exe("explorer.exe"), Some("shell:MyComputerFolder"), None);
         if let Some(ui) = w.upgrade() {
             if !s2.borrow().keep_open {
                 hide_panel(&ui, &s2);
@@ -396,7 +513,7 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
         if n.is_multiple_of(8) {
             update_mem(&ui);
         }
-        let (shown, keep) = { let s = s2.borrow(); (s.shown_at, s.keep_open) };
+        let (shown, keep) = { let s = s2.borrow(); (s.shown_at, s.keep_open || s.modal_open) };
         if keep {
             return;
         }

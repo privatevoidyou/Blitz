@@ -16,6 +16,11 @@ fn main() {
     win::free_console();
     let (dir, legacy) = core::config_dirs();
 
+    if let Some(path) = arg_value(&args, "--selftest-launch") {
+        let item = core::Launcher { name: "selftest".into(), path };
+        std::process::exit(if win::launch_shortcut(&item) { 0 } else { 1 });
+    }
+
     if let Some(report) = arg_value(&args, "--selftest-boost") {
         let cfg = core::Config::load(&dir, legacy.as_deref());
         let rep = win::boost(&cfg, cfg.trim_memory);
@@ -26,7 +31,7 @@ fn main() {
         let ok = win::autostart_set(v == "on");
         std::process::exit(if ok && win::autostart_get() == (v == "on") { 0 } else { 1 });
     }
-    if !win::single_instance() {
+    if !win::single_instance(args.iter().any(|a| a == "--wait-for-instance")) {
         return;
     }
     ui::run(args, dir, legacy);
