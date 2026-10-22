@@ -181,7 +181,7 @@ fn start_boost(ui: &Panel, st: &S) {
             if let Some(ui) = weak.upgrade() {
                 let mut msg = format!("已结束 {} 个程序，释放内存约 {} MB", rep.killed.len(), rep.freed_mb);
                 if !rep.retained.is_empty() {
-                    msg += &format!("；{} 个程序仍有窗口，请先保存或手动退出", rep.retained.len());
+                    msg += &format!("；{} 个程序仍在退出或有待处理窗口，请先保存", rep.retained.len());
                 }
                 if !rep.denied.is_empty() {
                     msg += &format!("；{} 个需管理员权限", rep.denied.len());

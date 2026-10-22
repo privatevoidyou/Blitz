@@ -271,6 +271,8 @@ pub fn boost(cfg: &Config, trim: bool) -> BoostReport {
         if handle_path(h).map(|p| p.to_lowercase()) != Some(key.clone()) || critical(h) || session_of(s.pid) != Some(my_session) { continue; }
         candidates.push(Candidate { process, pid: s.pid, key, can_terminate });
     }
+    let initial_windows = visible_windows();
+    let windowed_keys: HashSet<String> = candidates.iter().filter(|c| initial_windows.contains_key(&c.pid)).map(|c| c.key.clone()).collect();
     for c in &candidates {
         if running(c.process.0) && close_windows(c.pid) { rep.graceful_pids.push(c.pid); }
     }
@@ -278,7 +280,7 @@ pub fn boost(cfg: &Config, trim: bool) -> BoostReport {
     let windows = visible_windows();
     // If a program kept a window (e.g. an unsaved-document dialog), preserve
     // every process in that selected executable group, including its workers.
-    let retained: HashSet<String> = candidates.iter().filter(|c| running(c.process.0) && windows.contains_key(&c.pid))
+    let retained: HashSet<String> = candidates.iter().filter(|c| running(c.process.0) && (windowed_keys.contains(&c.key) || windows.contains_key(&c.pid)))
         .map(|c| c.key.clone()).collect();
     let mut killed = HashSet::new();
     for c in &candidates {
@@ -491,7 +493,9 @@ pub fn launch_shortcut(item: &Launcher) -> bool {
 
 pub fn system_exe(name: &str) -> String {
     let root = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-    PathBuf::from(root).join("System32").join(name).to_string_lossy().to_string()
+    let root = PathBuf::from(root);
+    let path = if name.eq_ignore_ascii_case("explorer.exe") { root.join(name) } else { root.join("System32").join(name) };
+    path.to_string_lossy().to_string()
 }
 
 // ---------- window helpers ----------
