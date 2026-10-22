@@ -4,11 +4,12 @@ use crate::core::{self, Config, Group, Launcher, ProcFacts};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::Diagnostics::ToolHelp::*;
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, STGM_READ};
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
@@ -330,6 +331,7 @@ pub fn is_admin() -> bool {
 }
 
 pub fn shell_open(file: &str, args: Option<&str>, verb: Option<&str>) -> bool {
+    let _com = ComScope::new();
     let f = wide(file);
     let a = args.map(wide);
     let v = verb.map(wide);
@@ -424,6 +426,34 @@ unsafe fn hicon_rgba(icon: HICON) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 // ---------- shortcuts ----------
+struct ComScope(bool);
+impl ComScope {
+    fn new() -> Self {
+        Self(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).is_ok() })
+    }
+}
+impl Drop for ComScope {
+    fn drop(&mut self) { if self.0 { unsafe { CoUninitialize(); } } }
+}
+
+fn shortcut_program(path: &Path) -> bool {
+    let _com = ComScope::new();
+    let read = || -> Option<String> {
+        unsafe {
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+            let file: IPersistFile = link.cast().ok()?;
+            let name = wide(&path.to_string_lossy());
+            file.Load(PCWSTR(name.as_ptr()), STGM_READ).ok()?;
+            let mut target = [0u16; 32768];
+            // Reading the stored target does not search, repair or run a link.
+            link.GetPath(&mut target, std::ptr::null_mut(), 0).ok()?;
+            let end = target.iter().position(|&c| c == 0)?;
+            Some(String::from_utf16_lossy(&target[..end]))
+        }
+    };
+    read().is_some_and(|target| core::valid_launcher_file(&target) && Path::new(&target).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")))
+}
+
 fn known(id: &windows::core::GUID) -> Option<PathBuf> {
     unsafe {
         let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
@@ -456,7 +486,7 @@ fn walk(d: &Path, depth: u32, out: &mut Vec<Launcher>) {
         let p = e.path();
         if p.is_dir() {
             walk(&p, depth + 1, out);
-        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) {
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) && shortcut_program(&p) {
             if let Some(n) = p.file_stem() {
                 out.push(Launcher { name: n.to_string_lossy().to_string(), path: p.to_string_lossy().to_string() });
             }

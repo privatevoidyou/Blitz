@@ -139,12 +139,8 @@ $linkDir = Join-Path $work "快捷 方式"
 New-Item -ItemType Directory $linkDir | Out-Null
 $marker = Join-Path $linkDir "运行 结果.txt"
 $shortcut = Join-Path $linkDir "测试 启动.lnk"
-$shell = New-Object -ComObject WScript.Shell
-$link = $shell.CreateShortcut($shortcut)
-$link.TargetPath = $fixture
-$link.Arguments = '--marker "' + $marker + '" --payload "测试 value"'
-$link.WorkingDirectory = $linkDir
-$link.Save()
+. "$PSScriptRoot/shortcut_fixture.ps1"
+[BlitzShortcutFixture]::Save($shortcut, $fixture, ('--marker "' + $marker + '" --payload "测试 value"'), $linkDir)
 $p = Start-Process $Exe -ArgumentList '--selftest-launch', ('"' + $shortcut + '"') -Wait -PassThru
 $deadline = (Get-Date).AddSeconds(8)
 while (-not (Test-Path $marker) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
