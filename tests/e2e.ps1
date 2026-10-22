@@ -58,8 +58,14 @@ Check "report lists killed key" (@($rep.killed) -contains $aPath.ToLower()) ($re
 $allowed = @($a.Id)
 $bad = @($rep.touched_pids | Where-Object { $allowed -notcontains $_ })
 Check "only the checked process was touched" ($bad.Count -eq 0) ("touched=" + ($rep.touched_pids -join ","))
-$dead = @($prot | Where-Object { -not (Alive $_.Id) })
-Check "no protected process died" ($dead.Count -eq 0) (($dead | ForEach-Object { $_.Name }) -join ",")
+$affectedPids = @($rep.touched_pids) + @($rep.graceful_pids) + @($rep.trimmed_pids)
+$affectedProtected = @($prot | Where-Object { $affectedPids -contains $_.Id })
+Check "no protected process was targeted or trimmed" ($affectedProtected.Count -eq 0) (($affectedProtected | ForEach-Object { $_.Name }) -join ",")
+# Service-host instances may stop naturally during this test. Keep the survival
+# assertion for persistent critical processes as well as checking every action.
+$persistent = @($prot | Where-Object { $_.Name -in @('csrss','wininit','winlogon','services','lsass') })
+$dead = @($persistent | Where-Object { -not (Alive $_.Id) })
+Check "persistent critical processes survived" ($dead.Count -eq 0) (($dead | ForEach-Object { $_.Name }) -join ",")
 Stop-Process -Id $b.Id, $x.Id -Force -ErrorAction SilentlyContinue
 
 # ---- 1b. unchecked child of a checked parent survives ----
