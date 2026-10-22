@@ -105,7 +105,11 @@ fn show_panel(ui: &Panel, st: &S) {
     ui.window().set_position(slint::PhysicalPosition::new(x, y));
     let _ = ui.show();
     if let Some(h) = win::find_own_window("疾风加速") {
-        win::style_panel(h);
+        // Diagnostic windows stay discoverable by Windows UI test tools.
+        // Normal tray panels remain tool windows, outside the taskbar/Alt-Tab.
+        if !st.borrow().keep_open {
+            win::style_panel(h);
+        }
         win::bring_to_front(h);
     }
     st.borrow_mut().shown_at = Some(Instant::now());
