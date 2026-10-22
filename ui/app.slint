@@ -3,6 +3,41 @@ import { CheckBox, LineEdit, Button, Switch, ListView } from "std-widgets.slint"
 export struct Proc { label: string, icon: image, checked: bool, header: bool }
 export struct App { name: string, icon: image }
 
+// A context-menu container forwards left clicks to its children. A TouchArea
+// placed over this layout would consume the checkbox's pointer events.
+export component ProcessEntry inherits ContextMenuArea {
+    in property <Proc> item;
+    callback toggled(bool);
+    callback whitelist();
+    height: 30px;
+    enabled: !root.item.header;
+    HorizontalLayout {
+        padding-left: 2px; spacing: 6px;
+        if !root.item.header: CheckBox {
+            text: ""; width: 28px;
+            checked: root.item.checked;
+            toggled => { root.toggled(self.checked); }
+        }
+        if !root.item.header: VerticalLayout {
+            alignment: center;
+            Image { source: root.item.icon; width: 16px; height: 16px; }
+        }
+        Text {
+            text: root.item.label; vertical-alignment: center;
+            overflow: elide; horizontal-stretch: 1;
+            color: root.item.header ? #ffffff90 : white;
+            font-weight: root.item.header ? 600 : 400;
+        }
+    }
+    Menu {
+        MenuItem {
+            title: "加入白名单（永不显示）";
+            enabled: !root.item.header;
+            activated => { root.whitelist(); }
+        }
+    }
+}
+
 component IconBtn inherits Rectangle {
     in property <string> glyph;
     in property <string> label;
@@ -63,8 +98,6 @@ export component Panel inherits Window {
     callback my-computer();
     callback screenshot();
     callback show-procs();
-
-    property <int> menu-index: -1;
 
     Rectangle { border-width: 1px; border-color: #ffffff22; }
 
@@ -141,25 +174,10 @@ export component Panel inherits Window {
                 Text { text: "勾选要关闭的软件（自动记住）· 右键加入白名单"; color: #ffffff90; font-size: 11px; }
                 ListView {
                     vertical-stretch: 1;
-                    for p[i] in root.items: Rectangle {
-                        height: 30px;
-                        HorizontalLayout {
-                            padding-left: 2px; spacing: 6px;
-                            if !p.header: CheckBox { text: ""; width: 28px; checked: p.checked; toggled => { root.toggled(i, self.checked); } }
-                            if !p.header: VerticalLayout { alignment: center; Image { source: p.icon; width: 16px; height: 16px; } }
-                            Text {
-                                text: p.label; vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
-                                color: p.header ? #ffffff90 : white; font-weight: p.header ? 600 : 400;
-                            }
-                        }
-                        TouchArea {
-                            pointer-event(ev) => {
-                                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && !p.header) {
-                                    root.menu-index = i;
-                                    menu.show();
-                                }
-                            }
-                        }
+                    for p[i] in root.items: ProcessEntry {
+                        item: p;
+                        toggled(on) => { root.toggled(i, on); }
+                        whitelist => { root.whitelist(i); }
                     }
                 }
                 if root.show-admin: Button { text: "以管理员重启"; clicked => { root.restart-admin(); } }
@@ -224,13 +242,4 @@ export component Panel inherits Window {
         }
     }
 
-    menu := PopupWindow {
-        x: 60px; y: 200px;
-        Rectangle {
-            background: #2c2c2c; border-radius: 6px; border-width: 1px; border-color: #ffffff30;
-            width: 200px; height: 36px;
-            Text { text: "加入白名单（永不显示）"; color: white; }
-            TouchArea { clicked => { root.whitelist(root.menu-index); } }
-        }
-    }
 }

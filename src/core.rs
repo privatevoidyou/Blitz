@@ -336,6 +336,25 @@ mod tests {
     }
 
     #[test]
+    fn checked_and_unchecked_states_survive_repeated_save_and_filtered_refresh() {
+        let d = tmp("toggle-refresh");
+        let groups = vec![g("c:\\apps\\Code.exe", true), g("c:\\apps\\Grok Bot.exe", true)];
+        let mut cfg = Config::default();
+        for on in [true, false, true, false] {
+            cfg.set_checked(&groups[0].key, on);
+            cfg.save(&d).unwrap();
+            cfg = Config::load(&d, None);
+            let filtered = build_rows(&groups, &cfg, "code");
+            assert_eq!(filtered.len(), 2);
+            assert_eq!(filtered[1].checked, on);
+            let all = build_rows(&groups, &cfg, "");
+            assert_eq!(all[1].checked, on);
+            assert!(!all[2].checked, "unrelated process must remain unchecked");
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
     fn rows_grouped_and_filtered() {
         let groups = vec![g("c:\\fg.exe", true), g("c:\\bg1.exe", false), g("c:\\bg2.exe", false)];
         let rows = build_rows(&groups, &Config::default(), "");
