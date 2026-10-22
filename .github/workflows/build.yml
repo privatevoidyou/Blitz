@@ -2,11 +2,13 @@ name: build
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: write
 env:
-  RELEASE_TAG: build-3
+  RELEASE_TAG: build-4
 jobs:
   build:
     runs-on: windows-latest
@@ -16,11 +18,11 @@ jobs:
         run: rustup toolchain install stable --profile minimal -c clippy && rustup default stable
       - uses: Swatinem/rust-cache@v2
       - name: Unit tests
-        run: cargo test --target x86_64-pc-windows-msvc
+        run: cargo test --locked --target x86_64-pc-windows-msvc
       - name: Clippy
-        run: cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+        run: cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings
       - name: Build release
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
       - name: Size
         shell: pwsh
         run: |
@@ -28,12 +30,12 @@ jobs:
           Copy-Item target\x86_64-pc-windows-msvc\release\Blitz.exe target\release\Blitz.exe -Force
           $s = (Get-Item target\release\Blitz.exe).Length
           "Blitz.exe size: $s bytes ($([math]::Round($s/1MB,2)) MB)" | Tee-Object -FilePath size.txt
+          if ($s -ge 10MB) { throw "Blitz.exe exceeds the single-digit MB size budget" }
       - name: E2E tests
         shell: pwsh
         run: ./tests/e2e.ps1
       - name: Screenshots
         shell: pwsh
-        continue-on-error: true
         run: ./tests/screenshots.ps1
       - uses: actions/upload-artifact@v4
         if: always()
@@ -47,9 +49,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: Blitz-exe, path: target/release/Blitz.exe }
       - name: Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Blitz 疾风加速 ${{ env.RELEASE_TAG }}
           make_latest: true
-          files: target/release/Blitz.exe
+          body: |
+            修复进程列表复选框被右键点击层遮挡的问题。支持勾选、取消勾选、搜索及重开后保留选择，右键白名单使用独立上下文菜单。
+            Windows CI 检查：cargo test、clippy -D warnings、真实进程 e2e；保持 Rust 单文件托盘程序。
+          files: |
+            target/release/Blitz.exe
+            screenshot-procs.png
+            e2e-results.txt
+            size.txt

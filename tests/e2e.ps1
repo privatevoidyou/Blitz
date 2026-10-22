@@ -11,8 +11,9 @@ function Check($name, $ok, $detail = "") {
 }
 function Alive($procId) { $null -ne (Get-Process -Id $procId -ErrorAction SilentlyContinue) }
 
-$work = Join-Path $env:RUNNER_TEMP "blitz-e2e"
-Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+$tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+$outputRoot = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
+$work = Join-Path $tempRoot ("blitz-e2e-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $work | Out-Null
 $cfgDir = Join-Path $work "cfg"
 $env:BLITZ_CONFIG_DIR = $cfgDir
@@ -108,6 +109,6 @@ Stop-Process -Id $blitz.Id, $e.Id -Force -ErrorAction SilentlyContinue
 $saved = Get-Content (Join-Path $cfgDir "config.json") -Raw | ConvertFrom-Json
 Check "config.json preserved selection" (@($saved.checked).Count -eq 1 -and $saved.auto_boost)
 
-$log | Set-Content (Join-Path $env:GITHUB_WORKSPACE "e2e-results.txt")
+$log | Set-Content (Join-Path $outputRoot "e2e-results.txt")
 if ($fail -gt 0) { Write-Host "$fail e2e check(s) failed"; exit 1 }
 Write-Host "all e2e checks passed"

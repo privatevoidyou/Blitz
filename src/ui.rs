@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 
 slint::include_modules!();
 
+#[cfg(test)]
+#[path = "ui_tests.rs"]
+mod tests;
+
 const PER_PAGE: usize = 12;
 
 struct State {
