@@ -149,7 +149,7 @@ export component Panel inherits Window {
             height: 34px;
             if root.view != 0: IconBtn { glyph: "\u{E72B}"; width: 34px; clicked => { root.view = 0; } }
             if root.view == 0: LineEdit {
-                placeholder-text: "搜索我的快捷方式";
+                placeholder-text: "输入要找的软件";
                 text <=> root.app-query;
                 edited(t) => { root.app-search(t); }
             }
