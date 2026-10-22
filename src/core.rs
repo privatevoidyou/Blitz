@@ -22,6 +22,8 @@ pub struct Config {
     /// 启动后自动加速
     #[serde(alias = "AutoBoostOnLaunch")]
     pub auto_boost: bool,
+    /// Only shortcuts explicitly added by the user appear on the home page.
+    pub shortcuts: Vec<Launcher>,
 }
 
 impl Config {
@@ -37,16 +39,38 @@ impl Config {
             let s = std::fs::read_to_string(d.join("config.json")).ok()?;
             serde_json::from_str::<Config>(s.trim_start_matches('\u{feff}')).ok()
         };
-        read(dir)
-            .or_else(|| legacy.and_then(read))
-            .unwrap_or_default()
-            .normalize()
+        if dir.join("config.json").exists() {
+            if let Some(cfg) = read(dir) {
+                return cfg.normalize();
+            }
+            // A broken current config must never revive old auto-boost targets.
+            let backup = dir.join("config.invalid.json");
+            if !backup.exists() {
+                let _ = std::fs::copy(dir.join("config.json"), backup);
+            }
+            return Config::default();
+        }
+        legacy.and_then(read).unwrap_or_default().normalize()
     }
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let tmp = dir.join("config.json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self).unwrap_or_default())?;
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(serde_json::to_string_pretty(self).map_err(std::io::Error::other)?.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(tmp, dir.join("config.json"))
+    }
+    pub fn add_shortcut(&mut self, item: Launcher) -> Result<bool, &'static str> {
+        if !valid_launcher_file(&item.path) {
+            return Err("请选择存在的 .lnk 快捷方式或 .exe 程序");
+        }
+        if self.shortcuts.iter().any(|x| x.path.eq_ignore_ascii_case(&item.path)) {
+            return Ok(false);
+        }
+        self.shortcuts.push(item);
+        Ok(true)
     }
     pub fn set_checked(&mut self, key: &str, on: bool) {
         let k = key.to_lowercase();
@@ -81,6 +105,7 @@ pub const PROTECTED: &[&str] = &[
     "searchhost", "searchapp", "searchindexer", "textinputhost", "logonui", "userinit", "spoolsv", "wmiprvse",
     "wudfhost", "lockapp", "applicationframehost", "systemsettingsbroker", "smartscreen", "dashost", "sppsvc",
     "winstore.app", "widgets", "widgetservice", "phoneexperiencehost", "crossdeviceservice", "useroobebroker",
+    "backgroundtaskhost", "shellhost", "chxsmartscreen", "werfault", "werfaultsecure",
 ];
 
 pub fn exe_stem(name: &str) -> String {
@@ -119,6 +144,7 @@ pub struct Group {
     pub display: String,
     pub foreground: bool,
     pub pids: Vec<u32>,
+    pub related: Vec<String>,
 }
 
 /// Display rows: header rows have `group == None`.
@@ -127,6 +153,7 @@ pub struct Row {
     pub label: String,
     pub group: Option<usize>,
     pub checked: bool,
+    pub hint: String,
 }
 
 /// Build the grouped list (前台应用 / 后台进程), applying search filter and remembered selection.
@@ -144,11 +171,12 @@ pub fn build_rows(groups: &[Group], cfg: &Config, query: &str) -> Vec<Row> {
         if items.is_empty() {
             continue;
         }
-        rows.push(Row { label: format!("{title}（{}）", items.len()), group: None, checked: false });
+        rows.push(Row { label: format!("{title}（{}）", items.len()), group: None, checked: false, hint: String::new() });
         for i in items {
             let g = &groups[i];
             let label = if g.pids.len() > 1 { format!("{} ({})", g.display, g.pids.len()) } else { g.display.clone() };
-            rows.push(Row { label, group: Some(i), checked: cfg.is_checked(&g.key) });
+            let hint = if g.related.is_empty() { String::new() } else { format!("进程树关联：{}", g.related.join("、")) };
+            rows.push(Row { label, group: Some(i), checked: cfg.is_checked(&g.key), hint });
         }
     }
     rows
@@ -160,10 +188,21 @@ pub fn targets<'a>(groups: &'a [Group], cfg: &Config) -> Vec<&'a Group> {
     groups.iter().filter(|g| cfg.is_checked(&g.key)).collect()
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Launcher {
     pub name: String,
     pub path: String,
+}
+
+pub fn valid_launcher_file(path: &str) -> bool {
+    let p = Path::new(path);
+    p.is_absolute() && p.is_file() && p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("lnk"))
+}
+
+pub fn in_directory(path: &str, dir: &str) -> bool {
+    let path = path.replace('/', "\\").to_lowercase();
+    let prefix = format!("{}\\", dir.replace('/', "\\").trim_end_matches('\\').to_lowercase());
+    path.starts_with(&prefix)
 }
 
 /// Filter launchers by query and return the page plus the page count.
@@ -306,8 +345,47 @@ mod tests {
         assert_eq!(Config::load(&d, None), Config::default());
     }
 
+    #[test]
+    fn corrupt_current_config_never_revives_legacy_auto_boost() {
+        let current = tmp("broken-current");
+        let old = tmp("old-autoboost");
+        let mut legacy = Config::default();
+        legacy.set_checked("c:\\apps\\editor.exe", true);
+        legacy.auto_boost = true;
+        legacy.save(&old).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join("config.json"), "broken input").unwrap();
+        let loaded = Config::load(&current, Some(&old));
+        assert!(!loaded.auto_boost && loaded.checked.is_empty());
+        assert_eq!(std::fs::read_to_string(current.join("config.invalid.json")).unwrap(), "broken input");
+    }
+
+    #[test]
+    fn shortcuts_are_opt_in_deduplicated_and_persisted() {
+        let dir = tmp("shortcuts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("示例 快捷方式.lnk");
+        std::fs::write(&path, []).unwrap();
+        let item = Launcher { name: "示例".into(), path: path.to_string_lossy().into() };
+        let mut cfg = Config::default();
+        assert!(cfg.shortcuts.is_empty());
+        assert_eq!(cfg.add_shortcut(item.clone()), Ok(true));
+        assert_eq!(cfg.add_shortcut(item), Ok(false));
+        cfg.save(&dir).unwrap();
+        assert_eq!(Config::load(&dir, None).shortcuts, cfg.shortcuts);
+        assert!(cfg.add_shortcut(Launcher { name: "bad".into(), path: "https://example.com/launch.exe".into() }).is_err());
+        let unsafe_file = dir.join("document.txt");
+        std::fs::write(&unsafe_file, []).unwrap();
+        assert!(!valid_launcher_file(&unsafe_file.to_string_lossy()));
+        assert!(in_directory("C:\\Windows\\System32\\ShellHost.exe", "c:\\windows"));
+        assert!(!in_directory("C:\\WindowsApps\\app.exe", "C:\\Windows"));
+        cfg.shortcuts.clear();
+        cfg.save(&dir).unwrap();
+        assert!(Config::load(&dir, None).shortcuts.is_empty());
+    }
+
     fn g(key: &str, fg: bool) -> Group {
-        Group { key: key.into(), path: key.into(), display: key.rsplit('\\').next().unwrap().into(), foreground: fg, pids: vec![1] }
+        Group { key: key.into(), path: key.into(), display: key.rsplit('\\').next().unwrap().into(), foreground: fg, pids: vec![1], related: vec![] }
     }
 
     #[test]

@@ -1,32 +1,39 @@
 import { CheckBox, LineEdit, Button, Switch, ListView } from "std-widgets.slint";
 
-export struct Proc { label: string, icon: image, checked: bool, header: bool }
-export struct App { name: string, icon: image }
+export struct Proc { label: string, icon: image, checked: bool, header: bool, hint: string }
+export struct App { name: string, icon: image, added: bool }
 
-// A context-menu container forwards left clicks to its children. A TouchArea
-// placed over this layout would consume the checkbox's pointer events.
+// One full-width CheckBox owns every left click in this row. Decorative
+// image/text siblings have no input handlers; ContextMenuArea handles right click.
 export component ProcessEntry inherits ContextMenuArea {
     in property <Proc> item;
     callback toggled(bool);
     callback whitelist();
-    height: 30px;
+    height: root.item.hint == "" ? 30px : 44px;
     enabled: !root.item.header;
+    if !root.item.header: CheckBox {
+        x: 2px; width: parent.width - 2px; height: parent.height;
+        text: ""; accessible-label: root.item.label + " " + root.item.hint;
+        checked: root.item.checked;
+        toggled => { root.toggled(self.checked); }
+    }
     HorizontalLayout {
-        padding-left: 2px; spacing: 6px;
-        if !root.item.header: CheckBox {
-            text: ""; width: 28px;
-            checked: root.item.checked;
-            toggled => { root.toggled(self.checked); }
-        }
+        padding-left: root.item.header ? 2px : 36px; spacing: 6px;
         if !root.item.header: VerticalLayout {
             alignment: center;
             Image { source: root.item.icon; width: 16px; height: 16px; }
         }
-        Text {
-            text: root.item.label; vertical-alignment: center;
-            overflow: elide; horizontal-stretch: 1;
-            color: root.item.header ? #ffffff90 : white;
-            font-weight: root.item.header ? 600 : 400;
+        VerticalLayout {
+            alignment: center; spacing: 0px;
+            Text {
+                text: root.item.label; vertical-alignment: center;
+                overflow: elide; horizontal-stretch: 1;
+                color: root.item.header ? #ffffff90 : white;
+                font-weight: root.item.header ? 600 : 400;
+            }
+            if root.item.hint != "": Text {
+                text: root.item.hint; font-size: 10px; color: #f5b942; overflow: elide;
+            }
         }
     }
     Menu {
@@ -36,6 +43,23 @@ export component ProcessEntry inherits ContextMenuArea {
             activated => { root.whitelist(); }
         }
     }
+}
+
+export component AppTile inherits ContextMenuArea {
+    in property <App> item;
+    callback launch();
+    callback remove();
+    Rectangle {
+        border-radius: 8px;
+        background: tile-touch.has-hover ? #ffffff14 : transparent;
+        VerticalLayout {
+            padding: 4px; spacing: 4px; alignment: center;
+            HorizontalLayout { alignment: center; Image { source: root.item.icon; width: 36px; height: 36px; } }
+            Text { text: root.item.name; color: #ffffffe0; font-size: 11px; horizontal-alignment: center; overflow: elide; wrap: no-wrap; }
+        }
+        tile-touch := TouchArea { clicked => { root.launch(); } }
+    }
+    Menu { MenuItem { title: "移除此快捷方式"; activated => { root.remove(); } } }
 }
 
 component IconBtn inherits Rectangle {
@@ -62,11 +86,12 @@ export component Panel inherits Window {
     height: 480px;
     default-font-family: "Microsoft YaHei UI";
     default-font-size: 13px;
-    background: #1b1d22f0;
+    background: #1b1d22;
 
-    // 0 = launcher, 1 = processes, 2 = settings
+    // 0 = shortcuts, 1 = processes, 2 = settings, 3 = add shortcuts
     in-out property <int> view: 0;
     in property <[App]> apps;
+    in property <[App]> installed;
     in property <int> page;
     in property <int> pages: 1;
     in property <[Proc]> items;
@@ -81,8 +106,14 @@ export component Panel inherits Window {
     in-out property <bool> trim-default;
     in-out property <string> app-query;
     in-out property <string> proc-query;
+    in-out property <string> installed-query;
 
     callback launch(int);
+    callback remove-shortcut(int);
+    callback show-add();
+    callback add-installed(int);
+    callback browse-shortcut();
+    callback installed-search(string);
     callback set-page(int);
     callback app-search(string);
     callback proc-search(string);
@@ -111,7 +142,7 @@ export component Panel inherits Window {
             height: 34px;
             if root.view != 0: IconBtn { glyph: "\u{E72B}"; width: 34px; clicked => { root.view = 0; } }
             if root.view == 0: LineEdit {
-                placeholder-text: "输入要找的软件";
+                placeholder-text: "搜索我的快捷方式";
                 text <=> root.app-query;
                 edited(t) => { root.app-search(t); }
             }
@@ -120,6 +151,12 @@ export component Panel inherits Window {
                 text <=> root.proc-query;
                 edited(t) => { root.proc-search(t); }
             }
+            if root.view == 3: LineEdit {
+                placeholder-text: "搜索已安装的软件";
+                text <=> root.installed-query;
+                edited(t) => { root.installed-search(t); }
+            }
+            if root.view == 0: IconBtn { glyph: "\u{E710}"; label: "添加"; clicked => { root.show-add(); } }
             if root.view == 2: Text { text: "设置"; font-size: 16px; font-weight: 600; color: white; vertical-alignment: center; horizontal-stretch: 1; }
             if root.view != 2: IconBtn { glyph: "\u{E713}"; width: 34px; clicked => { root.view = 2; } }
         }
@@ -132,46 +169,52 @@ export component Panel inherits Window {
             if root.view == 0: Rectangle {
                 property <length> cw: self.width / 4;
                 property <length> ch: (self.height - 24px) / 3;
-                for a[i] in root.apps: Rectangle {
-                    x: mod(i, 4) * cw;
-                    y: floor(i / 4) * ch;
+                for a[i] in root.apps: AppTile {
+                    x: mod(i, 4) * cw; y: floor(i / 4) * ch;
                     width: cw; height: ch;
-                    border-radius: 8px;
-                    background: at.has-hover ? #ffffff14 : transparent;
-                    VerticalLayout {
-                        padding: 4px; spacing: 4px; alignment: center;
-                        HorizontalLayout { alignment: center; Image { source: a.icon; width: 36px; height: 36px; } }
-                        Text { text: a.name; color: #ffffffe0; font-size: 11px; horizontal-alignment: center; overflow: elide; wrap: no-wrap; }
-                    }
-                    at := TouchArea { clicked => { root.launch(i); } }
+                    item: a;
+                    launch => { root.launch(i); }
+                    remove => { root.remove-shortcut(i); }
                 }
-                if root.apps.length == 0: Text { text: "没有找到软件"; color: #ffffff80; x: (parent.width - self.width) / 2; y: 100px; }
-                // pagination dots
-                HorizontalLayout {
-                    y: parent.height - 20px; height: 20px;
-                    alignment: center; spacing: 6px;
-                    for d in root.pages: Rectangle {
-                        width: 22px; height: 18px; border-radius: 9px;
-                        background: d == root.page ? #3d8bfd : (dt.has-hover ? #ffffff30 : #ffffff14);
-                        Text { text: d + 1; font-size: 11px; color: white; }
-                        dt := TouchArea { clicked => { root.set-page(d); } }
+                if root.apps.length == 0: VerticalLayout {
+                    alignment: center; spacing: 10px;
+                    Text { text: root.app-query == "" ? "还没有快捷方式" : "没有匹配的快捷方式"; color: #ffffffa0; horizontal-alignment: center; }
+                    Button { text: "添加快捷方式"; clicked => { root.show-add(); } }
+                }
+                if root.pages > 1: HorizontalLayout {
+                    y: parent.height - 24px; height: 24px;
+                    alignment: center; spacing: 12px;
+                    IconBtn { glyph: "\u{E76B}"; width: 28px; clicked => { if (root.page > 0) { root.set-page(root.page - 1); } } }
+                    Text { text: (root.page + 1) + " / " + root.pages; color: white; vertical-alignment: center; }
+                    IconBtn { glyph: "\u{E76C}"; width: 28px; clicked => { if (root.page + 1 < root.pages) { root.set-page(root.page + 1); } } }
+                }
+            }
+
+            if root.view == 3: VerticalLayout {
+                spacing: 8px;
+                Text { text: "从开始菜单和桌面选择，添加后显示在首页"; color: #ffffff90; font-size: 11px; wrap: word-wrap; }
+                ListView {
+                    vertical-stretch: 1;
+                    for a[i] in root.installed: Rectangle {
+                        height: 38px;
+                        background: candidate-touch.has-hover ? #ffffff14 : transparent;
+                        HorizontalLayout {
+                            spacing: 8px; padding-left: 4px; padding-right: 6px;
+                            VerticalLayout { alignment: center; Image { source: a.icon; width: 24px; height: 24px; } }
+                            Text { text: a.name; color: white; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                            Text { text: a.added ? "已添加" : "添加"; color: a.added ? #ffffff60 : #9fd0ff; vertical-alignment: center; }
+                        }
+                        candidate-touch := TouchArea { enabled: !a.added; clicked => { root.add-installed(i); } }
                     }
                 }
-                TouchArea {
-                    // wheel paging without blocking clicks
-                    scroll-event(e) => {
-                        if (e.delta-y < 0 && root.page + 1 < root.pages) { root.set-page(root.page + 1); return accept; }
-                        if (e.delta-y > 0 && root.page > 0) { root.set-page(root.page - 1); return accept; }
-                        reject
-                    }
-                }
+                Button { text: "选择 .lnk / .exe 文件…"; clicked => { root.browse-shortcut(); } }
             }
 
             // process selection
             if root.view == 1: VerticalLayout {
                 spacing: 6px;
-                CheckBox { text: "清理系统内存"; checked <=> root.trim; toggled => { root.trim-changed(self.checked); } }
-                Text { text: "勾选要关闭的软件（自动记住）· 右键加入白名单"; color: #ffffff90; font-size: 11px; }
+                CheckBox { text: "整理内存（仅本工具及所选程序）"; checked <=> root.trim; toggled => { root.trim-changed(self.checked); } }
+                Text { text: "点击整行勾选 · 右键白名单 · 后台依赖无法完整识别"; color: #ffffff90; font-size: 11px; }
                 ListView {
                     vertical-stretch: 1;
                     for p[i] in root.items: ProcessEntry {
@@ -191,7 +234,7 @@ export component Panel inherits Window {
                     Switch { checked <=> root.auto-start; toggled => { root.auto-start-changed(self.checked); } } }
                 HorizontalLayout { Text { text: "启动后自动加速"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
                     Switch { checked <=> root.auto-boost; toggled => { root.auto-boost-changed(self.checked); } } }
-                HorizontalLayout { Text { text: "默认清理系统内存"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
+                HorizontalLayout { Text { text: "默认整理所选程序内存"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
                     Switch { checked <=> root.trim-default; toggled => { root.trim-default-changed(self.checked); } } }
                 Button { text: "选择要关闭的软件…"; clicked => { root.show-procs(); } }
                 Text { text: "Blitz 疾风加速 · 托盘左键打开面板，右键菜单可退出"; color: #ffffff70; font-size: 11px; wrap: word-wrap; }
