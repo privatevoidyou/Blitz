@@ -57,7 +57,14 @@ export component AppTile inherits ContextMenuArea {
             HorizontalLayout { alignment: center; Image { source: root.item.icon; width: 36px; height: 36px; } }
             Text { text: root.item.name; color: #ffffffe0; font-size: 11px; horizontal-alignment: center; overflow: elide; wrap: no-wrap; }
         }
-        tile-touch := TouchArea { clicked => { root.launch(); } }
+        tile-touch := TouchArea {
+            clicked => { root.launch(); }
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                    root.show({ x: self.mouse-x, y: self.mouse-y });
+                }
+            }
+        }
     }
     Menu { MenuItem { title: "移除此快捷方式"; activated => { root.remove(); } } }
 }
