@@ -526,7 +526,16 @@ pub fn style_panel(h: HWND) {
 }
 
 pub fn foreground_is(h: HWND) -> bool {
-    unsafe { GetForegroundWindow() == h }
+    unsafe {
+        let mut active = GetForegroundWindow();
+        for _ in 0..16 {
+            if active == h { return true; }
+            let Ok(owner) = GetWindow(active, GW_OWNER) else { return false };
+            if owner.is_invalid() { return false; }
+            active = owner;
+        }
+        false
+    }
 }
 
 pub fn bring_to_front(h: HWND) {
@@ -658,7 +667,20 @@ pub fn single_instance(wait: bool) -> bool {
                 let _ = h; // keep the mutex handle open for the process lifetime
                 acquired
             }
-            Err(_) => true,
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn system_entries_resolve_to_real_absolute_windows_files() {
+        for name in ["explorer.exe", "shutdown.exe"] {
+            let file = super::system_exe(name);
+            assert!(std::path::Path::new(&file).is_absolute());
+            assert!(std::path::Path::new(&file).is_file(), "{file}");
+            assert!(super::windows_path(&file));
         }
     }
 }
