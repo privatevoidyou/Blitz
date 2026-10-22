@@ -133,6 +133,8 @@ if ($q) { Stop-Process -Id $q.ProcessId -Force -ErrorAction SilentlyContinue }
 $fixture = Join-Path $work "BlitzFixture.exe"
 rustc --edition 2021 tests/windows_fixture.rs -o $fixture
 if ($LASTEXITCODE -ne 0) { throw "Could not compile native e2e fixture" }
+New-Item -ItemType Directory target/e2e -Force | Out-Null
+Copy-Item -LiteralPath $fixture -Destination target/e2e/BlitzFixture.exe -Force
 $linkDir = Join-Path $work "快捷 方式"
 New-Item -ItemType Directory $linkDir | Out-Null
 $marker = Join-Path $linkDir "运行 结果.txt"

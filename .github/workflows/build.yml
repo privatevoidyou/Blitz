@@ -45,6 +45,7 @@ jobs:
             screenshot-*.png
             e2e-results.txt
             size.txt
+            target/e2e/BlitzFixture.exe
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with: { name: Blitz-exe, path: target/release/Blitz.exe }
