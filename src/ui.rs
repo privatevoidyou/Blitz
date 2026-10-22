@@ -39,6 +39,7 @@ impl State {
             ui.set_status(format!("保存失败，本次更改未生效：{error}").into());
             return false;
         }
+        if ui.get_status().starts_with("保存失败") { ui.set_status("已保存".into()); }
         true
     }
 }
