@@ -36,7 +36,7 @@ struct State {
 impl State {
     fn save(&self, ui: &Panel) -> bool {
         if let Err(error) = self.cfg.save(&self.dir) {
-            ui.set_status(format!("保存失败，重开可能丢失更改：{error}").into());
+            ui.set_status(format!("保存失败，本次更改未生效：{error}").into());
             return false;
         }
         true
@@ -331,9 +331,16 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
         let mut s = s2.borrow_mut();
         let Some(gi) = s.rows.get(i as usize).and_then(|r| r.group) else { return };
         let key = s.groups[gi].key.clone();
+        let previous = s.cfg.clone();
         s.cfg.set_checked(&key, on);
         s.rows[i as usize].checked = on;
-        if let Some(ui) = w.upgrade() { s.save(&ui); }
+        if let Some(ui) = w.upgrade() {
+            if !s.save(&ui) {
+                s.cfg = previous;
+                render_rows(&ui, &mut s);
+                return;
+            }
+        }
         if let Some(ui) = w.upgrade() {
             let m = ui.get_items();
             if let Some(mut row) = m.row_data(i as usize) {
@@ -349,9 +356,12 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
             let mut s = s2.borrow_mut();
             let Some(gi) = s.rows.get(i as usize).and_then(|r| r.group) else { return };
             let key = s.groups[gi].key.clone();
+            let previous = s.cfg.clone();
             s.cfg.whitelist.insert(key.clone());
             s.cfg.set_checked(&key, false);
-            if let Some(ui) = w.upgrade() { s.save(&ui); }
+            if let Some(ui) = w.upgrade() {
+                if !s.save(&ui) { s.cfg = previous; }
+            }
         }
         if let Some(ui) = w.upgrade() {
             refresh_procs(&ui, &s2);
@@ -368,28 +378,36 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     let s2 = st.clone();
     ui.on_trim_changed(move |on| {
         let mut s = s2.borrow_mut();
+        let previous = s.cfg.trim_memory;
         s.cfg.trim_memory = on;
-        if let Some(ui) = w.upgrade() { s.save(&ui); }
         if let Some(ui) = w.upgrade() {
-            ui.set_trim_default(on);
+            if !s.save(&ui) { s.cfg.trim_memory = previous; }
+            ui.set_trim(s.cfg.trim_memory);
+            ui.set_trim_default(s.cfg.trim_memory);
         }
     });
     let w = ui.as_weak();
     let s2 = st.clone();
     ui.on_trim_default_changed(move |on| {
         let mut s = s2.borrow_mut();
+        let previous = s.cfg.trim_memory;
         s.cfg.trim_memory = on;
-        if let Some(ui) = w.upgrade() { s.save(&ui); }
         if let Some(ui) = w.upgrade() {
-            ui.set_trim(on);
+            if !s.save(&ui) { s.cfg.trim_memory = previous; }
+            ui.set_trim(s.cfg.trim_memory);
+            ui.set_trim_default(s.cfg.trim_memory);
         }
     });
     let s2 = st.clone();
     let w = ui.as_weak();
     ui.on_auto_boost_changed(move |on| {
         let mut s = s2.borrow_mut();
+        let previous = s.cfg.auto_boost;
         s.cfg.auto_boost = on;
-        if let Some(ui) = w.upgrade() { s.save(&ui); }
+        if let Some(ui) = w.upgrade() {
+            if !s.save(&ui) { s.cfg.auto_boost = previous; }
+            ui.set_auto_boost(s.cfg.auto_boost);
+        }
     });
     let w = ui.as_weak();
     ui.on_auto_start_changed(move |on| {

@@ -384,6 +384,19 @@ mod tests {
         assert!(Config::load(&dir, None).shortcuts.is_empty());
     }
 
+    #[test]
+    fn failed_save_never_overwrites_the_last_complete_config() {
+        let dir = tmp("failed-save");
+        let mut cfg = Config::default();
+        cfg.set_checked("c:\\apps\\editor.exe", true);
+        cfg.save(&dir).unwrap();
+        std::fs::create_dir(dir.join("config.json.tmp")).unwrap();
+        let previous = cfg.clone();
+        cfg.set_checked("c:\\apps\\editor.exe", false);
+        assert!(cfg.save(&dir).is_err());
+        assert_eq!(Config::load(&dir, None), previous);
+    }
+
     fn g(key: &str, fg: bool) -> Group {
         Group { key: key.into(), path: key.into(), display: key.rsplit('\\').next().unwrap().into(), foreground: fg, pids: vec![1], related: vec![] }
     }
