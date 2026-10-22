@@ -45,7 +45,7 @@ fn main() {
         loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
     }
     if !args.iter().any(|a| a == "--hold-window") {
-        std::fs::write(std::env::current_exe().unwrap().with_extension("started"), "started").unwrap();
+        std::fs::write(std::env::current_exe().unwrap().with_extension("started"), std::env::current_dir().unwrap().to_string_lossy().as_bytes()).unwrap();
         return;
     }
     unsafe {

@@ -331,17 +331,22 @@ pub fn is_admin() -> bool {
 }
 
 pub fn shell_open(file: &str, args: Option<&str>, verb: Option<&str>) -> bool {
+    shell_open_at(file, args, verb, None)
+}
+
+fn shell_open_at(file: &str, args: Option<&str>, verb: Option<&str>, directory: Option<&str>) -> bool {
     let _com = ComScope::new();
     let f = wide(file);
     let a = args.map(wide);
     let v = verb.map(wide);
+    let d = directory.map(wide);
     unsafe {
         let r = ShellExecuteW(
             None,
             v.as_ref().map(|v| PCWSTR(v.as_ptr())).unwrap_or(PCWSTR::null()),
             PCWSTR(f.as_ptr()),
             a.as_ref().map(|a| PCWSTR(a.as_ptr())).unwrap_or(PCWSTR::null()),
-            PCWSTR::null(),
+            d.as_ref().map(|d| PCWSTR(d.as_ptr())).unwrap_or(PCWSTR::null()),
             SW_SHOWNORMAL,
         );
         r.0 as isize > 32
@@ -518,7 +523,12 @@ pub fn choose_shortcut(owner: Option<HWND>) -> Option<Launcher> {
 
 pub fn launch_shortcut(item: &Launcher) -> bool {
     // Let the shell open the .lnk itself, preserving its arguments and cwd.
-    core::valid_launcher_file(&item.path) && shell_open(&item.path, None, Some("open"))
+    if !core::valid_launcher_file(&item.path) { return false; }
+    let path = Path::new(&item.path);
+    let directory = if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) {
+        path.parent().map(|p| p.to_string_lossy().into_owned())
+    } else { None };
+    shell_open_at(&item.path, None, Some("open"), directory.as_deref())
 }
 
 pub fn system_exe(name: &str) -> String {

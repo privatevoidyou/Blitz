@@ -154,6 +154,9 @@ $p = Start-Process $Exe -ArgumentList '--selftest-launch', ('"' + $fixture + '"'
 $deadline = (Get-Date).AddSeconds(8)
 while (-not (Test-Path ([IO.Path]::ChangeExtension($fixture, 'started'))) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
 Check "direct exe starts" (($p.ExitCode -eq 0) -and (Test-Path ([IO.Path]::ChangeExtension($fixture, 'started'))))
+if (Test-Path ([IO.Path]::ChangeExtension($fixture, 'started'))) {
+  Check "direct exe starts in its own directory" ((Get-Content ([IO.Path]::ChangeExtension($fixture, 'started')) -Raw) -eq $work)
+}
 $p = Start-Process $Exe -ArgumentList '--selftest-launch', ('"' + (Join-Path $work 'missing.exe') + '"') -Wait -PassThru
 Check "missing launcher rejected" ($p.ExitCode -ne 0)
 
