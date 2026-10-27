@@ -3,7 +3,7 @@ use crate::core::{self, Config, Group, Launcher, Row};
 use crate::win;
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -53,7 +53,9 @@ fn to_image(w: u32, h: u32, px: &[u8]) -> Image {
 fn refresh_procs(ui: &Panel, st: &S) {
     let mut s = st.borrow_mut();
     s.groups = win::scan(&s.cfg);
-    let paths: Vec<String> = s.groups.iter().map(|g| g.path.clone()).collect();
+    let paths: HashSet<String> = s.groups.iter().map(|g| g.path.clone()).collect();
+    // Keep the icon cache bounded to programs that are currently running.
+    s.proc_icons.retain(|p, _| paths.contains(p));
     for p in paths {
         s.proc_icons.entry(p).or_insert_with_key(|p| win::file_icon(p, false).map(|(w, h, px)| to_image(w, h, &px)).unwrap_or_default());
     }
@@ -71,6 +73,7 @@ fn render_rows(ui: &Panel, s: &mut State) {
             checked: r.checked,
             header: r.group.is_none(),
             hint: r.hint.clone().into(),
+            size: r.size.clone().into(),
         })
         .collect();
     ui.set_items(ModelRc::new(VecModel::from(v)));
@@ -142,7 +145,10 @@ fn update_mem(ui: &Panel) {
 
 fn show_panel(ui: &Panel, st: &S) {
     update_mem(ui);
-    refresh_procs(ui, st);
+    // Scanning every process is only needed for the process page; keep tray clicks fast.
+    if ui.get_view() == 1 {
+        refresh_procs(ui, st);
+    }
     let size = ui.window().size();
     let (x, y) = win::panel_pos(size.width as i32, size.height as i32);
     ui.window().set_position(slint::PhysicalPosition::new(x, y));
@@ -180,21 +186,40 @@ fn start_boost(ui: &Panel, st: &S) {
         let _ = std::fs::write(dir.join("last_boost.json"), serde_json::to_string_pretty(&rep).unwrap_or_default());
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                let mut msg = format!("已结束 {} 个程序，释放内存约 {} MB", rep.killed.len(), rep.freed_mb);
-                if !rep.retained.is_empty() {
-                    msg += &format!("；{} 个程序仍在退出或有待处理窗口，请先保存", rep.retained.len());
-                }
-                if !rep.denied.is_empty() {
-                    msg += &format!("；{} 个需管理员权限", rep.denied.len());
-                    ui.set_show_admin(!win::is_admin());
-                }
-                ui.set_status(msg.into());
+                ui.set_status(boost_message(&rep, trim).into());
+                ui.set_show_admin((!rep.denied.is_empty() || rep.deep_needs_admin) && !win::is_admin());
                 ui.set_busy(false);
                 update_mem(&ui);
-                ui.invoke_proc_search(ui.get_proc_query());
+                ui.invoke_refresh_procs();
             }
         });
     });
+}
+
+fn boost_message(rep: &win::BoostReport, trim: bool) -> String {
+    let mut msg = format!("已结束 {} 个程序", rep.killed.len());
+    if !rep.tree_pids.is_empty() {
+        msg += &format!("（含 {} 个子进程）", rep.tree_pids.len());
+    }
+    if rep.freed_mb > 0 {
+        msg += &format!("，释放约 {} MB", rep.freed_mb);
+    }
+    if trim {
+        msg += &format!("；整理 {} 个后台进程，回收约 {} MB", rep.trimmed_pids.len(), rep.trimmed_mb);
+    }
+    if !rep.deep.is_empty() {
+        msg += "；已深度整理";
+    }
+    if rep.deep_needs_admin {
+        msg += "；深度整理需管理员权限";
+    }
+    if !rep.retained.is_empty() {
+        msg += &format!("；{} 个程序有待处理窗口，已保留，请先保存", rep.retained.len());
+    }
+    if !rep.denied.is_empty() {
+        msg += &format!("；{} 个需管理员权限", rep.denied.len());
+    }
+    msg
 }
 
 pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
@@ -223,6 +248,8 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     ui.set_trim(cfg.trim_memory);
     ui.set_trim_default(cfg.trim_memory);
     ui.set_auto_boost(cfg.auto_boost);
+    ui.set_kill_tree(cfg.kill_tree);
+    ui.set_deep_trim(cfg.deep_trim);
     ui.set_auto_start(win::autostart_get());
 
     // Home contains only shortcuts explicitly saved by the user.
@@ -314,6 +341,14 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
     let w = ui.as_weak();
     let s2 = st.clone();
     ui.on_proc_search(move |_| {
+        // Typing only filters the last scan; rescanning every process per keystroke is slow.
+        if let Some(ui) = w.upgrade() {
+            render_rows(&ui, &mut s2.borrow_mut());
+        }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_refresh_procs(move || {
         if let Some(ui) = w.upgrade() {
             refresh_procs(&ui, &s2);
         }
@@ -397,6 +432,32 @@ pub fn run(args: Vec<String>, dir: PathBuf, legacy: Option<PathBuf>) {
             if !s.save(&ui) { s.cfg.trim_memory = previous; }
             ui.set_trim(s.cfg.trim_memory);
             ui.set_trim_default(s.cfg.trim_memory);
+        }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_kill_tree_changed(move |on| {
+        let mut s = s2.borrow_mut();
+        let previous = s.cfg.kill_tree;
+        s.cfg.kill_tree = on;
+        if let Some(ui) = w.upgrade() {
+            if !s.save(&ui) { s.cfg.kill_tree = previous; }
+            ui.set_kill_tree(s.cfg.kill_tree);
+            render_rows(&ui, &mut s);
+        }
+    });
+    let w = ui.as_weak();
+    let s2 = st.clone();
+    ui.on_deep_trim_changed(move |on| {
+        let mut s = s2.borrow_mut();
+        let previous = s.cfg.deep_trim;
+        s.cfg.deep_trim = on;
+        if let Some(ui) = w.upgrade() {
+            if !s.save(&ui) { s.cfg.deep_trim = previous; }
+            ui.set_deep_trim(s.cfg.deep_trim);
+            if s.cfg.deep_trim && !win::is_admin() {
+                ui.set_status("深度整理需要管理员权限，可在进程页加速后点「以管理员重启」".into());
+            }
         }
     });
     let s2 = st.clone();

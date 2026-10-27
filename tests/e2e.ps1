@@ -25,8 +25,8 @@ function Dummy($name) {
   Copy-Item $ping $p -Force
   return (Start-Process $p -ArgumentList "-t", "127.0.0.1" -WindowStyle Hidden -PassThru)
 }
-function WriteCfg($checked, $autoBoost = $false, $trim = $false, $whitelist = @()) {
-  @{ checked = @($checked | ForEach-Object { $_.ToLower() }); whitelist = @($whitelist); trim_memory = $trim; auto_boost = $autoBoost } |
+function WriteCfg($checked, $autoBoost = $false, $trim = $false, $whitelist = @(), $tree = $false) {
+  @{ checked = @($checked | ForEach-Object { $_.ToLower() }); whitelist = @($whitelist); trim_memory = $trim; auto_boost = $autoBoost; kill_tree = $tree } |
     ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $cfgDir "config.json")
 }
 
@@ -51,8 +51,8 @@ $rep = Get-Content $report -Raw | ConvertFrom-Json
 Write-Host (Get-Content $report -Raw)
 Check "checked dummy killed" (-not (Alive $a.Id))
 Check "unchecked dummy survived" (Alive $b.Id)
-$unexpectedTrim = @($rep.trimmed_pids | Where-Object { $_ -ne $boostProc.Id -and $_ -ne $a.Id })
-Check "memory trim never touches unchecked or protected processes" ($unexpectedTrim.Count -eq 0)
+Check "background trim reaches unchecked windowless process" (@($rep.trimmed_pids) -contains $b.Id)
+Check "background trim never touches protected-name process or Blitz itself" ((@($rep.trimmed_pids) -notcontains $x.Id) -and (@($rep.trimmed_pids) -notcontains $boostProc.Id))
 Check "checked-but-protected-name dummy survived" (Alive $x.Id)
 Check "report lists killed key" (@($rep.killed) -contains $aPath.ToLower()) ($rep.killed -join ",")
 $allowed = @($a.Id)
@@ -68,7 +68,7 @@ $dead = @($persistent | Where-Object { -not (Alive $_.Id) })
 Check "persistent critical processes survived" ($dead.Count -eq 0) (($dead | ForEach-Object { $_.Name }) -join ",")
 Stop-Process -Id $b.Id, $x.Id -Force -ErrorAction SilentlyContinue
 
-# ---- 1b. unchecked child of a checked parent survives ----
+# ---- 1b. process tree off: unchecked child of a checked parent survives ----
 $parentExe = Join-Path $work "dummyP.exe"; Copy-Item "$env:WINDIR\System32\cmd.exe" $parentExe -Force
 $childExe = Join-Path $work "dummyQ.exe"; Copy-Item $ping $childExe -Force
 $pp = Start-Process $parentExe -ArgumentList "/c", "`"$childExe`" -t 127.0.0.1" -WindowStyle Hidden -PassThru
@@ -77,7 +77,23 @@ $q = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($pp.Id)" | Where-O
 WriteCfg @($parentExe)
 Start-Process $Exe -ArgumentList "--selftest-boost", $report -Wait
 Check "checked parent killed" (-not (Alive $pp.Id))
-Check "unchecked child of checked parent survived" (($null -ne $q) -and (Alive $q.ProcessId)) "child=$($q.ProcessId)"
+Check "tree off: unchecked child of checked parent survived" (($null -ne $q) -and (Alive $q.ProcessId)) "child=$($q.ProcessId)"
+if ($q) { Stop-Process -Id $q.ProcessId -Force -ErrorAction SilentlyContinue }
+
+# ---- 1c. process tree on: the child of a checked parent ends with it ----
+$pp = Start-Process $parentExe -ArgumentList "/c", "`"$childExe`" -t 127.0.0.1" -WindowStyle Hidden -PassThru
+Start-Sleep 2
+$q = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($pp.Id)" | Where-Object { $_.Name -eq "dummyQ.exe" } | Select-Object -First 1
+$bystander = Dummy "dummyR.exe"
+WriteCfg @($parentExe) $false $false @() $true
+Start-Process $Exe -ArgumentList "--selftest-boost", $report -Wait
+$rep = Get-Content $report -Raw | ConvertFrom-Json
+Start-Sleep 1
+Check "tree on: checked parent killed" (-not (Alive $pp.Id))
+Check "tree on: child of checked parent killed" (($null -ne $q) -and -not (Alive $q.ProcessId)) "child=$($q.ProcessId)"
+Check "tree on: child reported as tree process" (($null -ne $q) -and (@($rep.tree_pids) -contains $q.ProcessId))
+Check "tree on: unrelated process survived" (Alive $bystander.Id)
+Stop-Process -Id $bystander.Id -Force -ErrorAction SilentlyContinue
 if ($q) { Stop-Process -Id $q.ProcessId -Force -ErrorAction SilentlyContinue }
 
 # ---- 2. first run: no config -> nothing killed ----
@@ -128,7 +144,7 @@ Check "config.json preserved selection" (@($saved.checked).Count -eq 1 -and $sav
 $pp = Start-Process $parentExe -ArgumentList "/c", "`"$childExe`" -t 127.0.0.1" -WindowStyle Hidden -PassThru
 Start-Sleep 1
 $q = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($pp.Id)" | Where-Object Name -eq "dummyQ.exe" | Select-Object -First 1
-WriteCfg @($parentExe, $childExe) $false $true @($childExe.ToLower())
+WriteCfg @($parentExe, $childExe) $false $true @($childExe.ToLower()) $true
 Start-Process $Exe -ArgumentList "--selftest-boost", $report -Wait
 $rep = Get-Content $report -Raw | ConvertFrom-Json
 Check "whitelisted selected child survives checked parent" (($null -ne $q) -and (Alive $q.ProcessId))
