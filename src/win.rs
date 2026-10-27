@@ -1,7 +1,9 @@
 //! Win32 layer: processes, kill, memory, icons, shortcuts, autostart, tray.
 #![cfg(windows)]
 use crate::core::{self, Config, Group, Launcher, ProcFacts};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use windows::core::{w, Interface, PCWSTR, PWSTR};
@@ -10,7 +12,8 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::Diagnostics::ToolHelp::*;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, STGM_READ};
-use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
+use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
+use windows::Win32::System::ProcessStatus::{EmptyWorkingSet, GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -58,6 +61,10 @@ impl Drop for ProcessHandle {
     fn drop(&mut self) { unsafe { let _ = CloseHandle(self.0); } }
 }
 
+fn open(pid: u32, rights: PROCESS_ACCESS_RIGHTS) -> Option<ProcessHandle> {
+    unsafe { OpenProcess(rights, false, pid).ok().map(ProcessHandle) }
+}
+
 fn handle_path(h: HANDLE) -> Option<String> {
     let mut buf = [0u16; 32768];
     let mut n = buf.len() as u32;
@@ -71,13 +78,78 @@ fn critical(h: HANDLE) -> bool {
     unsafe { IsProcessCritical(h, &mut critical).is_err() || critical.as_bool() }
 }
 
-pub fn image_path(pid: u32) -> Option<String> {
-    let h = ProcessHandle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? });
-    handle_path(h.0)
+/// Creation time as a FILETIME tick count; 0 when unknown.
+fn created_at(h: HANDLE) -> u64 {
+    let (mut c, mut e, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    unsafe {
+        if GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u).is_err() { return 0; }
+    }
+    ((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64
+}
+
+/// (private commit bytes, working-set bytes)
+fn memory(h: HANDLE) -> (u64, u64) {
+    let mut m = PROCESS_MEMORY_COUNTERS_EX { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+    unsafe {
+        if GetProcessMemoryInfo(h, &mut m as *mut _ as *mut PROCESS_MEMORY_COUNTERS, m.cb).is_err() { return (0, 0); }
+    }
+    (m.PrivateUsage as u64, m.WorkingSetSize as u64)
 }
 
 fn windows_path(path: &str) -> bool {
     std::env::var("WINDIR").map(|dir| core::in_directory(path, &dir)).unwrap_or(true)
+}
+
+/// Everything Blitz needs to know about one process, read through a single handle.
+pub struct Probe {
+    pub pid: u32,
+    pub parent: u32,
+    pub name: String,
+    pub path: Option<String>,
+    pub created: u64,
+    pub critical: bool,
+    pub private: u64,
+    pub session: Option<u32>,
+}
+
+impl Probe {
+    fn key(&self) -> String { self.path.as_deref().unwrap_or_default().to_lowercase() }
+    fn node(&self) -> core::Node { core::Node { pid: self.pid, parent: self.parent, created: self.created } }
+}
+
+pub fn probe_all() -> Vec<Probe> {
+    snapshot().into_iter().map(|s| {
+        let h = if s.pid > 4 { open(s.pid, PROCESS_QUERY_LIMITED_INFORMATION) } else { None };
+        let (path, created, critical, private) = match &h {
+            Some(h) => (handle_path(h.0), created_at(h.0), critical(h.0), memory(h.0).0),
+            None => (None, 0, true, 0),
+        };
+        Probe { pid: s.pid, parent: s.parent, session: session_of(s.pid), name: s.name, path, created, critical, private }
+    }).collect()
+}
+
+fn protected(p: &Probe, self_pid: u32, my_session: u32) -> bool {
+    core::is_protected(&ProcFacts { pid: p.pid, exe_name: &p.name, session: p.session, path: p.path.as_deref() }, self_pid, my_session)
+        || p.path.as_deref().is_some_and(windows_path)
+        || p.critical
+}
+
+/// True when Windows refuses to open the process at all (needs administrator rights),
+/// as opposed to the process having exited or been replaced in the meantime.
+fn access_denied(pid: u32) -> bool {
+    unsafe {
+        match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            Ok(h) => { let _ = CloseHandle(h); false }
+            Err(e) => e.code() == E_ACCESSDENIED,
+        }
+    }
+}
+
+/// Re-open `pid` and confirm it is still the exact process that was probed (pids are reused).
+fn reopen(p: &Probe, rights: PROCESS_ACCESS_RIGHTS) -> Option<ProcessHandle> {
+    let h = open(p.pid, rights | PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let same = handle_path(h.0).map(|x| x.to_lowercase()) == Some(p.key()) && created_at(h.0) == p.created && p.created != 0;
+    (same && !critical(h.0)).then_some(h)
 }
 
 pub fn file_description(path: &str) -> Option<String> {
@@ -116,11 +188,28 @@ pub fn file_description(path: &str) -> Option<String> {
     }
 }
 
-/// pid -> window title of visible, unowned top-level windows.
+fn cloaked(h: HWND) -> bool {
+    let mut v = 0u32;
+    unsafe {
+        windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(h, windows::Win32::Graphics::Dwm::DWMWA_CLOAKED, &mut v as *mut _ as *mut c_void, 4).is_ok() && v != 0
+    }
+}
+
+fn tool_window(h: HWND) -> bool {
+    unsafe { (GetWindowLongPtrW(h, GWL_EXSTYLE) as u32) & WS_EX_TOOLWINDOW.0 != 0 }
+}
+
+fn unowned(h: HWND) -> bool {
+    unsafe { GetWindow(h, GW_OWNER).map(|o| o.is_invalid()).unwrap_or(true) }
+}
+
+/// pid -> window title of visible, unowned, titled application windows.
+/// Cloaked windows (suspended UWP frames, other virtual desktops, hidden input panels)
+/// and tool windows do not make a process a "foreground application".
 pub fn visible_windows() -> HashMap<u32, (HWND, String)> {
     unsafe extern "system" fn cb(h: HWND, lp: LPARAM) -> BOOL {
         let map = &mut *(lp.0 as *mut HashMap<u32, (HWND, String)>);
-        if IsWindowVisible(h).as_bool() && GetWindow(h, GW_OWNER).map(|o| o.is_invalid()).unwrap_or(true) {
+        if IsWindowVisible(h).as_bool() && unowned(h) && !tool_window(h) && !cloaked(h) {
             let mut buf = [0u16; 256];
             let n = GetWindowTextW(h, &mut buf);
             if n > 0 {
@@ -138,66 +227,99 @@ pub fn visible_windows() -> HashMap<u32, (HWND, String)> {
     map
 }
 
-fn facts_protected(s: &Snap, path: Option<&str>, self_pid: u32, my_session: u32) -> bool {
-    if core::is_protected(&ProcFacts { pid: s.pid, exe_name: &s.name, session: session_of(s.pid), path }, self_pid, my_session)
-        || path.is_some_and(windows_path) {
-        return true;
+/// Processes that still show any real window, including owned dialogs such as
+/// "save changes?" prompts and windows on other virtual desktops. Used to decide
+/// what must be preserved, so it deliberately errs on the side of keeping.
+fn window_pids() -> HashSet<u32> {
+    unsafe extern "system" fn cb(h: HWND, lp: LPARAM) -> BOOL {
+        let set = &mut *(lp.0 as *mut HashSet<u32>);
+        let mut r = RECT::default();
+        if IsWindowVisible(h).as_bool() && !tool_window(h) && GetWindowRect(h, &mut r).is_ok() && r.right > r.left && r.bottom > r.top {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            set.insert(pid);
+        }
+        TRUE
     }
-    let Ok(h) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, s.pid) }) else { return true };
-    let h = ProcessHandle(h);
-    critical(h.0)
+    let mut set = HashSet::new();
+    unsafe { let _ = EnumWindows(Some(cb), LPARAM(&mut set as *mut _ as isize)); }
+    set
+}
+
+fn describe(path: &str) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(path).cloned()) {
+        return hit;
+    }
+    let value = file_description(path);
+    if let Ok(mut c) = cache.lock() {
+        if c.len() > 1024 { c.clear(); }
+        c.insert(path.to_string(), value.clone());
+    }
+    value
 }
 
 pub fn scan(cfg: &Config) -> Vec<Group> {
     let self_pid = std::process::id();
     let my_session = session_of(self_pid).unwrap_or(u32::MAX);
     let wins = visible_windows();
+    let probes = probe_all();
     let mut map: HashMap<String, Group> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
-    let snaps = snapshot();
-    for s in &snaps {
-        let path = image_path(s.pid);
-        if facts_protected(s, path.as_deref(), self_pid, my_session) {
+    let mut key_of: HashMap<u32, String> = HashMap::new();
+    for p in &probes {
+        if protected(p, self_pid, my_session) {
             continue;
         }
-        let path = path.unwrap_or_default();
+        let path = p.path.clone().unwrap_or_default();
         let key = path.to_lowercase();
-        if cfg.is_whitelisted(&key, &s.name) {
+        if cfg.is_whitelisted(&key, &p.name) {
             continue;
         }
+        key_of.insert(p.pid, key.clone());
         let g = map.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
-            let stem = Path::new(&path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| s.name.clone());
-            Group { key: key.clone(), path: path.clone(), display: file_description(&path).unwrap_or(stem), foreground: false, pids: vec![], related: vec![] }
+            let stem = Path::new(&path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| p.name.clone());
+            Group { key: key.clone(), path: path.clone(), display: describe(&path).unwrap_or(stem), foreground: false, pids: vec![], related: vec![], children: vec![], mem: 0 }
         });
-        g.pids.push(s.pid);
-        if let Some((_, title)) = wins.get(&s.pid) {
-            if !g.foreground && g.display.to_lowercase() == core::exe_stem(&s.name) {
+        g.pids.push(p.pid);
+        g.mem += p.private;
+        if let Some((_, title)) = wins.get(&p.pid) {
+            if !g.foreground && g.display.to_lowercase() == core::exe_stem(&p.name) {
                 g.display = title.clone();
             }
             g.foreground = true;
         }
     }
     let mut v: Vec<Group> = order.into_iter().filter_map(|k| map.remove(&k)).collect();
-    // A verified current process-tree ancestor is a useful association hint,
-    // not a claim that other background processes are safe to terminate.
-    let parents: HashMap<u32, u32> = snaps.iter().map(|p| (p.pid, p.parent)).collect();
-    let foreground: HashMap<u32, String> = v.iter().filter(|g| g.foreground)
-        .flat_map(|g| g.pids.iter().map(|&pid| (pid, g.display.clone()))).collect();
-    for g in v.iter_mut().filter(|g| !g.foreground) {
-        let mut names = std::collections::BTreeSet::new();
-        for pid in &g.pids {
-            let mut parent = parents.get(pid).copied();
-            let mut seen = HashSet::new();
-            while let Some(pid) = parent {
-                if !seen.insert(pid) || seen.len() > 64 { break; }
-                if let Some(name) = foreground.get(&pid) { names.insert(name.clone()); break; }
-                parent = parents.get(&pid).copied();
+    let nodes: Vec<core::Node> = probes.iter().map(Probe::node).collect();
+    let tree = core::Tree::new(&nodes);
+    let index: HashMap<String, usize> = v.iter().enumerate().map(|(i, g)| (g.key.clone(), i)).collect();
+    let mut children: Vec<BTreeSet<String>> = vec![BTreeSet::new(); v.len()];
+    let mut related: Vec<BTreeSet<String>> = vec![BTreeSet::new(); v.len()];
+    for (i, g) in v.iter().enumerate() {
+        // Exactly what "连同子进程" would end: walk only through eligible processes.
+        for (pid, _) in tree.descendants(&g.pids, |pid| key_of.contains_key(&pid)) {
+            if let Some(&j) = key_of.get(&pid).and_then(|k| index.get(k)) {
+                if j != i { children[i].insert(v[j].display.clone()); }
             }
         }
-        g.related = names.into_iter().collect();
+        // A verified foreground ancestor is a useful association hint for background
+        // groups, not a claim that other background processes are safe to terminate.
+        if g.foreground {
+            for (pid, _) in tree.descendants(&g.pids, |_| true) {
+                if let Some(&j) = key_of.get(&pid).and_then(|k| index.get(k)) {
+                    if j != i && !v[j].foreground { related[j].insert(g.display.clone()); }
+                }
+            }
+        }
     }
-    v.sort_by_key(|g| g.display.to_lowercase());
+    for (i, g) in v.iter_mut().enumerate() {
+        g.children = std::mem::take(&mut children[i]).into_iter().collect();
+        g.related = std::mem::take(&mut related[i]).into_iter().collect();
+    }
+    v.sort_by(|a, b| b.mem.cmp(&a.mem).then_with(|| a.display.to_lowercase().cmp(&b.display.to_lowercase())));
     v
 }
 
@@ -213,19 +335,33 @@ pub fn mem() -> (u32, u64) {
 pub struct BoostReport {
     pub killed: Vec<String>,
     pub killed_pids: Vec<u32>,
+    /// Descendant processes ended together with a selected program.
+    pub tree_pids: Vec<u32>,
     pub denied: Vec<String>,
     pub retained: Vec<String>,
     pub touched_pids: Vec<u32>,
     pub graceful_pids: Vec<u32>,
     pub trimmed_pids: Vec<u32>,
+    /// Private memory of the processes that ended (MB).
     pub freed_mb: u64,
+    /// Working-set reduction of trimmed background processes (MB).
+    pub trimmed_mb: u64,
+    /// Change of available physical memory, for reference only (MB, may be 0).
+    pub avail_delta_mb: u64,
+    /// System-wide steps that succeeded (administrator only).
+    pub deep: Vec<String>,
+    pub deep_needs_admin: bool,
 }
 
 struct Candidate {
     process: ProcessHandle,
     pid: u32,
     key: String,
+    /// Key of the selected program this process belongs to (itself for selected ones).
+    root: String,
+    tree: bool,
     can_terminate: bool,
+    private: u64,
 }
 
 fn running(h: HANDLE) -> bool { unsafe { WaitForSingleObject(h, 0) == WAIT_TIMEOUT } }
@@ -235,7 +371,7 @@ fn close_windows(pid: u32) -> bool {
         let (wanted, sent) = &mut *(lp.0 as *mut (u32, bool));
         let mut pid = 0;
         GetWindowThreadProcessId(h, Some(&mut pid));
-        if pid == *wanted && IsWindowVisible(h).as_bool() && GetWindow(h, GW_OWNER).map(|o| o.is_invalid()).unwrap_or(true) {
+        if pid == *wanted && IsWindowVisible(h).as_bool() && unowned(h) {
             *sent |= PostMessageW(h, WM_CLOSE, WPARAM(0), LPARAM(0)).is_ok();
         }
         TRUE
@@ -245,84 +381,166 @@ fn close_windows(pid: u32) -> bool {
     context.1
 }
 
-/// Pin each selected process by an open handle throughout the operation. Do not
-/// traverse descendants: every checked executable is already enumerated here.
+fn remaining_ms(deadline: Instant) -> u32 {
+    deadline.saturating_duration_since(Instant::now()).as_millis() as u32
+}
+
+/// Trim one background process: empty its working set and lower its memory priority a
+/// little, so Windows repurposes those idle pages before the file cache and the pages of
+/// programs in use, instead of them flooding straight back. Returns bytes trimmed.
+fn trim_background(p: &Probe) -> Option<u64> {
+    let h = reopen(p, PROCESS_SET_QUOTA | PROCESS_SET_INFORMATION).or_else(|| reopen(p, PROCESS_SET_QUOTA))?;
+    let before = memory(h.0).1;
+    unsafe {
+        EmptyWorkingSet(h.0).ok()?;
+        let info = MEMORY_PRIORITY_INFORMATION { MemoryPriority: MEMORY_PRIORITY_BELOW_NORMAL };
+        let _ = SetProcessInformation(h.0, ProcessMemoryPriority, &info as *const _ as *const c_void, std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32);
+    }
+    Some(before.saturating_sub(memory(h.0).1))
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtSetSystemInformation(class: i32, info: *const c_void, length: u32) -> i32;
+}
+
+fn enable_privilege(name: PCWSTR) -> bool {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_err() { return false; }
+        let token = ProcessHandle(token);
+        let mut luid = LUID::default();
+        if LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid).is_err() { return false; }
+        let tp = TOKEN_PRIVILEGES { PrivilegeCount: 1, Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }] };
+        AdjustTokenPrivileges(token.0, false, Some(&tp), 0, None, None).is_ok() && GetLastError() != ERROR_NOT_ALL_ASSIGNED
+    }
+}
+
+/// System-wide memory list commands (the same ones RAMMap uses). Administrator only.
+fn deep_clean() -> Vec<String> {
+    const SYSTEM_MEMORY_LIST_INFORMATION: i32 = 80;
+    const STEPS: [(i32, &str); 3] = [(2, "全部进程工作集"), (3, "已修改页"), (5, "低优先级备用页")];
+    let _ = enable_privilege(w!("SeIncreaseQuotaPrivilege"));
+    if !enable_privilege(w!("SeProfileSingleProcessPrivilege")) { return Vec::new(); }
+    STEPS.iter().filter(|(command, _)| unsafe {
+        NtSetSystemInformation(SYSTEM_MEMORY_LIST_INFORMATION, command as *const i32 as *const c_void, 4) >= 0
+    }).map(|(_, name)| name.to_string()).collect()
+}
+
+/// Pin each selected process (and, with `kill_tree`, its verified descendants) by an
+/// open handle throughout the operation.
 pub fn boost(cfg: &Config, trim: bool) -> BoostReport {
     let mut rep = BoostReport::default();
     let before = mem().1;
     let self_pid = std::process::id();
     let my_session = session_of(self_pid).unwrap_or(u32::MAX);
-    let mut candidates = Vec::new();
-    for s in snapshot() {
-        let path = image_path(s.pid);
-        if facts_protected(&s, path.as_deref(), self_pid, my_session) { continue; }
-        let key = path.unwrap_or_default().to_lowercase();
-        if !cfg.is_checked(&key) || cfg.is_whitelisted(&key, &s.name) { continue; }
-        let rights = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
-        let (h, can_terminate) = unsafe {
-            match OpenProcess(rights | PROCESS_TERMINATE, false, s.pid) {
-                Ok(h) => (h, true),
-                Err(_) => match OpenProcess(rights, false, s.pid) {
-                    Ok(h) => (h, false),
-                    Err(_) => { rep.denied.push(key); continue; }
-                },
-            }
-        };
-        let process = ProcessHandle(h);
-        if handle_path(h).map(|p| p.to_lowercase()) != Some(key.clone()) || critical(h) || session_of(s.pid) != Some(my_session) { continue; }
-        candidates.push(Candidate { process, pid: s.pid, key, can_terminate });
+    let probes = probe_all();
+    let by_pid: HashMap<u32, &Probe> = probes.iter().map(|p| (p.pid, p)).collect();
+    let eligible = |p: &Probe| !protected(p, self_pid, my_session) && !cfg.is_whitelisted(&p.key(), &p.name);
+
+    let roots: Vec<u32> = probes.iter().filter(|p| eligible(p) && cfg.is_checked(&p.key())).map(|p| p.pid).collect();
+    let mut chosen: Vec<(u32, u32, bool)> = roots.iter().map(|&pid| (pid, pid, false)).collect();
+    if cfg.kill_tree {
+        let nodes: Vec<core::Node> = probes.iter().map(Probe::node).collect();
+        let tree = core::Tree::new(&nodes);
+        let follow = |pid: u32| by_pid.get(&pid).is_some_and(|p| eligible(p));
+        chosen.extend(tree.descendants(&roots, follow).into_iter().map(|(pid, root)| (pid, root, true)));
     }
-    let initial_windows = visible_windows();
-    let windowed_keys: HashSet<String> = candidates.iter().filter(|c| initial_windows.contains_key(&c.pid)).map(|c| c.key.clone()).collect();
+
+    let mut candidates = Vec::new();
+    for (pid, root, tree) in chosen {
+        let (Some(p), Some(r)) = (by_pid.get(&pid), by_pid.get(&root)) else { continue };
+        let key = p.key();
+        let can_terminate;
+        let process = match reopen(p, PROCESS_SYNCHRONIZE | PROCESS_TERMINATE) {
+            Some(h) => { can_terminate = true; h }
+            None => match reopen(p, PROCESS_SYNCHRONIZE) {
+                Some(h) => { can_terminate = false; h }
+                None => { if !tree && access_denied(pid) { rep.denied.push(key); } continue; }
+            },
+        };
+        candidates.push(Candidate { process, pid, key, root: r.key(), tree, can_terminate, private: p.private });
+    }
+
+    // 1. Ask every windowed program to close normally.
     for c in &candidates {
         if running(c.process.0) && close_windows(c.pid) { rep.graceful_pids.push(c.pid); }
     }
-    if !rep.graceful_pids.is_empty() { std::thread::sleep(std::time::Duration::from_secs(2)); }
-    let windows = visible_windows();
-    // If a program kept a window (e.g. an unsaved-document dialog), preserve
-    // every process in that selected executable group, including its workers.
-    let retained: HashSet<String> = candidates.iter().filter(|c| running(c.process.0) && (windowed_keys.contains(&c.key) || windows.contains_key(&c.pid)))
-        .map(|c| c.key.clone()).collect();
-    let mut killed = HashSet::new();
-    for c in &candidates {
-        if !running(c.process.0) {
-            killed.insert(c.key.clone()); rep.killed_pids.push(c.pid); continue;
+    if !rep.graceful_pids.is_empty() {
+        // Wait until the windows are gone (closed, or hidden to the tray) or 5 s passed.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let open = window_pids();
+            if !candidates.iter().any(|c| running(c.process.0) && open.contains(&c.pid)) || Instant::now() >= deadline { break; }
         }
-        if retained.contains(&c.key) { continue; }
+        // Give programs whose windows closed a moment to finish exiting by themselves.
+        let grace = Instant::now() + Duration::from_millis(1500);
+        for c in candidates.iter().filter(|c| rep.graceful_pids.contains(&c.pid)) {
+            unsafe { WaitForSingleObject(c.process.0, remaining_ms(grace)); }
+        }
+    }
+
+    // 2. Anything still showing a window (e.g. an unsaved-document prompt) is kept,
+    //    together with every process of that program and its tree.
+    let open = window_pids();
+    let retained: HashSet<String> = candidates.iter().filter(|c| running(c.process.0) && open.contains(&c.pid)).map(|c| c.key.clone()).collect();
+    let keep = |c: &Candidate| retained.contains(&c.key) || retained.contains(&c.root);
+
+    // 3. Terminate the rest, parents before children, then wait for all of them together.
+    let mut killed = HashSet::new();
+    let mut ended: Vec<&Candidate> = Vec::new();
+    let mut pending: Vec<&Candidate> = Vec::new();
+    for c in &candidates {
+        if !running(c.process.0) { ended.push(c); continue; }
+        if keep(c) { continue; }
         if !c.can_terminate { rep.denied.push(c.key.clone()); continue; }
         if handle_path(c.process.0).map(|p| p.to_lowercase()) != Some(c.key.clone()) || critical(c.process.0) { continue; }
         rep.touched_pids.push(c.pid);
-        unsafe {
-            match TerminateProcess(c.process.0, 1) {
-                Ok(()) => {
-                    WaitForSingleObject(c.process.0, 3000);
-                    killed.insert(c.key.clone()); rep.killed_pids.push(c.pid);
-                }
-                Err(e) if e.code() == E_ACCESSDENIED => rep.denied.push(c.key.clone()),
-                Err(_) => {}
-            }
+        match unsafe { TerminateProcess(c.process.0, 1) } {
+            Ok(()) => pending.push(c),
+            Err(e) if e.code() == E_ACCESSDENIED => rep.denied.push(c.key.clone()),
+            Err(_) => {}
         }
     }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    for c in &pending { unsafe { WaitForSingleObject(c.process.0, remaining_ms(deadline)); } }
+    for c in ended.into_iter().chain(pending) {
+        killed.insert(c.key.clone());
+        rep.killed_pids.push(c.pid);
+        if c.tree { rep.tree_pids.push(c.pid); }
+        rep.freed_mb += c.private;
+    }
+    rep.freed_mb /= 1024 * 1024;
+
+    // 4. Optional: trim unselected *background* programs. Foreground applications are
+    //    left alone (trimming what you are using only makes it page back in and stutter);
+    //    protected, whitelisted and retained programs are never touched.
     if trim {
-        // Unchecked programs, Windows components and whitelist entries are not
-        // trimmed. Keeping an application's save dialog also preserves its RAM.
-        let pids = std::iter::once(self_pid).chain(candidates.iter()
-            .filter(|c| running(c.process.0) && !retained.contains(&c.key)).map(|c| c.pid));
-        for pid in pids {
-            unsafe {
-                if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA, false, pid) {
-                    let h = ProcessHandle(h);
-                    if EmptyWorkingSet(h.0).is_ok() { rep.trimmed_pids.push(pid); }
-                }
+        let foreground: HashSet<String> = { let w = visible_windows(); probes.iter().filter(|p| w.contains_key(&p.pid)).map(Probe::key).collect() };
+        let by_candidate: HashMap<u32, &Candidate> = candidates.iter().map(|c| (c.pid, c)).collect();
+        let mut trimmed = 0u64;
+        for p in probes.iter().filter(|p| p.pid != self_pid && eligible(p)) {
+            let key = p.key();
+            if foreground.contains(&key) || retained.contains(&key) { continue; }
+            if by_candidate.get(&p.pid).is_some_and(|c| keep(c) || !running(c.process.0)) { continue; }
+            if let Some(bytes) = trim_background(p) {
+                rep.trimmed_pids.push(p.pid);
+                trimmed += bytes;
             }
         }
+        rep.trimmed_mb = trimmed / (1024 * 1024);
+        if cfg.deep_trim {
+            if is_admin() { rep.deep = deep_clean(); } else { rep.deep_needs_admin = true; }
+        }
     }
+
     rep.denied.sort(); rep.denied.dedup();
     for key in retained.iter().chain(rep.denied.iter()) { killed.remove(key); }
     rep.retained = retained.into_iter().collect(); rep.retained.sort();
     rep.killed = killed.into_iter().collect(); rep.killed.sort();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    rep.freed_mb = mem().1.saturating_sub(before);
+    std::thread::sleep(Duration::from_millis(300));
+    rep.avail_delta_mb = mem().1.saturating_sub(before);
     rep
 }
 
