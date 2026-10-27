@@ -1,6 +1,6 @@
 import { CheckBox, LineEdit, Button, Switch, ListView } from "std-widgets.slint";
 
-export struct Proc { label: string, icon: image, checked: bool, header: bool, hint: string }
+export struct Proc { label: string, icon: image, checked: bool, header: bool, hint: string, size: string }
 export struct App { name: string, icon: image, added: bool }
 
 // One full-width CheckBox owns every left click in this row. Decorative
@@ -20,13 +20,13 @@ export component ProcessEntry inherits ContextMenuArea {
         toggled => { root.toggled(self.checked); }
     }
     HorizontalLayout {
-        padding-left: root.item.header ? 2px : 36px; spacing: 6px;
+        padding-left: root.item.header ? 2px : 36px; padding-right: 8px; spacing: 6px;
         if !root.item.header: VerticalLayout {
             alignment: center;
             Image { source: root.item.icon; width: 16px; height: 16px; }
         }
         VerticalLayout {
-            alignment: center; spacing: 0px;
+            alignment: center; spacing: 0px; horizontal-stretch: 1;
             Text {
                 text: root.item.label; vertical-alignment: center;
                 overflow: elide; horizontal-stretch: 1;
@@ -36,6 +36,9 @@ export component ProcessEntry inherits ContextMenuArea {
             if root.item.hint != "": Text {
                 text: root.item.hint; font-size: 10px; color: #f5b942; overflow: elide;
             }
+        }
+        if !root.item.header && root.item.size != "": Text {
+            text: root.item.size; font-size: 11px; color: #ffffff90; vertical-alignment: center; horizontal-alignment: right;
         }
     }
     Menu {
@@ -113,6 +116,8 @@ export component Panel inherits Window {
     in-out property <bool> auto-start;
     in-out property <bool> auto-boost;
     in-out property <bool> trim-default;
+    in-out property <bool> kill-tree;
+    in-out property <bool> deep-trim;
     in-out property <string> app-query;
     in-out property <string> proc-query;
     in-out property <string> installed-query;
@@ -133,6 +138,9 @@ export component Panel inherits Window {
     callback auto-start-changed(bool);
     callback auto-boost-changed(bool);
     callback trim-default-changed(bool);
+    callback kill-tree-changed(bool);
+    callback deep-trim-changed(bool);
+    callback refresh-procs();
     callback restart-admin();
     callback shutdown();
     callback my-computer();
@@ -222,8 +230,8 @@ export component Panel inherits Window {
             // process selection
             if root.view == 1: VerticalLayout {
                 spacing: 6px;
-                CheckBox { text: "整理内存（仅本工具及所选程序）"; enabled: !root.busy; checked <=> root.trim; toggled => { root.trim-changed(self.checked); } }
-                Text { text: "点击整行勾选 · 右键白名单 · 后台依赖无法完整识别"; color: #ffffff90; font-size: 11px; }
+                CheckBox { text: "同时整理后台内存（未勾选、无窗口的程序）"; enabled: !root.busy; checked <=> root.trim; toggled => { root.trim-changed(self.checked); } }
+                Text { text: root.kill-tree ? "点击整行勾选 · 右键白名单 · 连同子进程一起结束" : "点击整行勾选 · 右键白名单 · 仅结束所选程序"; color: #ffffff90; font-size: 11px; }
                 ListView {
                     vertical-stretch: 1;
                     for p[i] in root.items: ProcessEntry {
@@ -238,14 +246,19 @@ export component Panel inherits Window {
 
             // settings
             if root.view == 2: VerticalLayout {
-                spacing: 14px;
+                spacing: 10px;
                 alignment: start;
                 HorizontalLayout { Text { text: "开机自动启动"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
                     Switch { checked <=> root.auto-start; toggled => { root.auto-start-changed(self.checked); } } }
                 HorizontalLayout { Text { text: "启动后自动加速"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
                     Switch { checked <=> root.auto-boost; toggled => { root.auto-boost-changed(self.checked); } } }
-                HorizontalLayout { Text { text: "默认整理所选程序内存"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
+                HorizontalLayout { Text { text: "结束时连同子进程"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
+                    Switch { checked <=> root.kill-tree; toggled => { root.kill-tree-changed(self.checked); } } }
+                HorizontalLayout { Text { text: "默认整理后台内存"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
                     Switch { checked <=> root.trim-default; toggled => { root.trim-default-changed(self.checked); } } }
+                HorizontalLayout { Text { text: "深度整理（需管理员）"; color: white; vertical-alignment: center; horizontal-stretch: 1; }
+                    Switch { checked <=> root.deep-trim; toggled => { root.deep-trim-changed(self.checked); } } }
+                Text { text: "深度整理会清空所有进程工作集、写出已修改页并释放低优先级缓存，之后可能短暂变卡"; color: #ffffff70; font-size: 11px; wrap: word-wrap; }
                 Button { text: "选择要关闭的软件…"; clicked => { root.show-procs(); } }
                 Text { text: "Blitz 疾风加速 · 托盘左键打开面板，右键菜单可退出"; color: #ffffff70; font-size: 11px; wrap: word-wrap; }
             }
